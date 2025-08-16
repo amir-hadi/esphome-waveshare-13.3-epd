@@ -24,6 +24,7 @@ CONF_POWER_PIN = "power_pin"
 CONF_CS_MASTER_PIN = "cs_master_pin"
 CONF_CS_SLAVE_PIN = "cs_slave_pin"
 CONF_IMAGE_URL = "image_url"
+CONF_SPI_ID = "spi_id"
 
 epd_photo_frame_ns = cg.esphome_ns.namespace("epd_photo_frame")
 EPDPhotoFrame = epd_photo_frame_ns.class_(
@@ -33,6 +34,7 @@ EPDPhotoFrame = epd_photo_frame_ns.class_(
 CONFIG_SCHEMA = display.BASIC_DISPLAY_SCHEMA.extend(
     {
         cv.GenerateID(): cv.declare_id(EPDPhotoFrame),
+        cv.GenerateID(CONF_SPI_ID): cv.use_id(spi.SPIComponent),
         cv.Required(CONF_RESET_PIN): pins.gpio_output_pin_schema,
         cv.Required(CONF_DC_PIN): pins.gpio_output_pin_schema,
         cv.Required(CONF_BUSY_PIN): pins.gpio_input_pin_schema,
@@ -53,7 +55,9 @@ async def to_code(config):
     await cg.register_component(var, config)
     await display.register_display(var, config)
 
-    # SPI device registration omitted to avoid requiring cs_pin in YAML
+    # Set SPI parent directly without requiring cs_pin
+    spi_parent = await cg.get_variable(config[CONF_SPI_ID])
+    cg.add(var.assign_spi_parent(spi_parent))
 
     # Add pins
     reset_pin = await gpio_pin_expression(config[CONF_RESET_PIN])

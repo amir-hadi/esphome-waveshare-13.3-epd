@@ -25,6 +25,7 @@ class EPDPhotoFrame : public display::DisplayBuffer, public spi::SPIDevice<spi::
   void set_cs_slave_pin(GPIOPin *cs_slave_pin) { cs_slave_pin_ = cs_slave_pin; }
   void set_image_url(const std::string &image_url) { image_url_ = image_url; }
   void set_update_interval(uint32_t update_interval) { update_interval_ = update_interval; }
+  void assign_spi_parent(spi::SPIComponent *parent) { spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARITY_LOW, spi::CLOCK_PHASE_LEADING, spi::DATA_RATE_4MHZ>::set_spi_parent(parent); }
 
   void setup() override;
   void dump_config() override;
