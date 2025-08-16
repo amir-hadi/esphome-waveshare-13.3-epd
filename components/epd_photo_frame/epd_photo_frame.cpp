@@ -10,6 +10,11 @@ namespace epd_photo_frame {
 
 static const char *const TAG = "epd_photo_frame";
 
+static inline void cs_all(esphome::GPIOPin *cs_m, esphome::GPIOPin *cs_s, bool level_high) {
+  cs_m->digital_write(level_high);
+  cs_s->digital_write(level_high);
+}
+
 void EPDPhotoFrame::setup() {
   ESP_LOGCONFIG(TAG, "Setting up EPD Photo Frame...");
   
@@ -153,43 +158,110 @@ void EPDPhotoFrame::sendImageData() {
 
 void EPDPhotoFrame::initDisplay() {
   ESP_LOGI(TAG, "Initializing EPD display...");
-  
-  this->resetDisplay();
-  this->powerOn();
-  
-  // Send initialization commands
-  this->sendCommand(PSR);
-  this->sendData(0x8F);
-  
-  this->sendCommand(PWR_EPD);
-  this->sendData(0x03);
-  
-  this->sendCommand(PON);
-  this->waitForBusy();
-  
-  this->sendCommand(PSR);
-  this->sendData(0x8F);
-  
-  this->sendCommand(TRES);
-  this->sendData(0x04); // 1200
-  this->sendData(0xB0);
-  this->sendData(0x06); // 1600
-  this->sendData(0x40);
-  
-  this->sendCommand(CDI);
-  this->sendData(0x97);
-  
-  this->sendCommand(TCON);
-  this->sendData(0x05);
-  
-  this->sendCommand(EN_BUF);
-  this->sendData(0x80);
-  
-  this->sendCommand(CCSET);
-  this->sendData(0x00);
-  
-  this->sendCommand(PWS);
-  this->sendData(0xAA);
+
+  // Reset sequence (mirror original firmware)
+  this->reset_pin_->digital_write(true);
+  delay(30);
+  this->reset_pin_->digital_write(false);
+  delay(30);
+  this->reset_pin_->digital_write(true);
+  delay(30);
+  this->reset_pin_->digital_write(false);
+  delay(30);
+  this->reset_pin_->digital_write(true);
+  delay(30);
+
+  // Ensure power enabled as in original
+  this->power_pin_->digital_write(true);
+
+  // Data tables from original firmware
+  const uint8_t AN_TM_V[] = {0xC0, 0x1C, 0x1C, 0xCC, 0xCC, 0xCC, 0x15, 0x15, 0x55};
+  const uint8_t CMD66_V[] = {0x49, 0x55, 0x13, 0x5D, 0x05, 0x10};
+  const uint8_t PSR_V[] = {0xDF, 0x69};
+  const uint8_t CDI_VV[] = {0xF7};
+  const uint8_t TCON_VV[] = {0x03, 0x03};
+  const uint8_t AGID_VV[] = {0x10};
+  const uint8_t PWS_VV[] = {0x22};
+  const uint8_t CCSET_VV[] = {0x01};
+  const uint8_t TRES_VV[] = {0x04, 0xB0, 0x03, 0x20};
+  const uint8_t PWR_VV[] = {0x0F, 0x00, 0x28, 0x2C, 0x28, 0x38};
+  const uint8_t EN_BUF_VV[] = {0x07};
+  const uint8_t BTST_P_VV[] = {0xE8, 0x28};
+  const uint8_t BOOST_VDDP_EN_VV[] = {0x01};
+  const uint8_t BTST_N_VV[] = {0xE8, 0x28};
+  const uint8_t BUCK_BOOST_VDDN_VV[] = {0x01};
+  const uint8_t TFT_VCOM_POWER_VV[] = {0x02};
+
+  // Helper to send command + buffer under both CS or specific
+  auto send_buf = [this](uint8_t cmd, const uint8_t *buf, size_t len) {
+    this->sendCommand(cmd);
+    for (size_t i = 0; i < len; i++) this->sendData(buf[i]);
+  };
+
+  // Sequence
+  this->cs_master_pin_->digital_write(false);
+  send_buf(AN_TM, AN_TM_V, sizeof(AN_TM_V));
+  cs_all(this->cs_master_pin_, this->cs_slave_pin_, true);
+
+  cs_all(this->cs_master_pin_, this->cs_slave_pin_, false);
+  send_buf(CMD66, CMD66_V, sizeof(CMD66_V));
+  cs_all(this->cs_master_pin_, this->cs_slave_pin_, true);
+
+  cs_all(this->cs_master_pin_, this->cs_slave_pin_, false);
+  send_buf(PSR, PSR_V, sizeof(PSR_V));
+  cs_all(this->cs_master_pin_, this->cs_slave_pin_, true);
+
+  cs_all(this->cs_master_pin_, this->cs_slave_pin_, false);
+  send_buf(CDI, CDI_VV, sizeof(CDI_VV));
+  cs_all(this->cs_master_pin_, this->cs_slave_pin_, true);
+
+  cs_all(this->cs_master_pin_, this->cs_slave_pin_, false);
+  send_buf(TCON, TCON_VV, sizeof(TCON_VV));
+  cs_all(this->cs_master_pin_, this->cs_slave_pin_, true);
+
+  cs_all(this->cs_master_pin_, this->cs_slave_pin_, false);
+  send_buf(AGID, AGID_VV, sizeof(AGID_VV));
+  cs_all(this->cs_master_pin_, this->cs_slave_pin_, true);
+
+  cs_all(this->cs_master_pin_, this->cs_slave_pin_, false);
+  send_buf(PWS, PWS_VV, sizeof(PWS_VV));
+  cs_all(this->cs_master_pin_, this->cs_slave_pin_, true);
+
+  cs_all(this->cs_master_pin_, this->cs_slave_pin_, false);
+  send_buf(CCSET, CCSET_VV, sizeof(CCSET_VV));
+  cs_all(this->cs_master_pin_, this->cs_slave_pin_, true);
+
+  cs_all(this->cs_master_pin_, this->cs_slave_pin_, false);
+  send_buf(TRES, TRES_VV, sizeof(TRES_VV));
+  cs_all(this->cs_master_pin_, this->cs_slave_pin_, true);
+
+  this->cs_master_pin_->digital_write(false);
+  send_buf(PWR_EPD, PWR_VV, sizeof(PWR_VV));
+  cs_all(this->cs_master_pin_, this->cs_slave_pin_, true);
+
+  this->cs_master_pin_->digital_write(false);
+  send_buf(EN_BUF, EN_BUF_VV, sizeof(EN_BUF_VV));
+  cs_all(this->cs_master_pin_, this->cs_slave_pin_, true);
+
+  this->cs_master_pin_->digital_write(false);
+  send_buf(BTST_P, BTST_P_VV, sizeof(BTST_P_VV));
+  cs_all(this->cs_master_pin_, this->cs_slave_pin_, true);
+
+  this->cs_master_pin_->digital_write(false);
+  send_buf(BOOST_VDDP_EN, BOOST_VDDP_EN_VV, sizeof(BOOST_VDDP_EN_VV));
+  cs_all(this->cs_master_pin_, this->cs_slave_pin_, true);
+
+  this->cs_master_pin_->digital_write(false);
+  send_buf(BTST_N, BTST_N_VV, sizeof(BTST_N_VV));
+  cs_all(this->cs_master_pin_, this->cs_slave_pin_, true);
+
+  this->cs_master_pin_->digital_write(false);
+  send_buf(BUCK_BOOST_VDDN, BUCK_BOOST_VDDN_VV, sizeof(BUCK_BOOST_VDDN_VV));
+  cs_all(this->cs_master_pin_, this->cs_slave_pin_, true);
+
+  this->cs_master_pin_->digital_write(false);
+  send_buf(TFT_VCOM_POWER, TFT_VCOM_POWER_VV, sizeof(TFT_VCOM_POWER_VV));
+  cs_all(this->cs_master_pin_, this->cs_slave_pin_, true);
   
   this->display_initialized_ = true;
   ESP_LOGI(TAG, "EPD display initialized");
@@ -210,34 +282,59 @@ void EPDPhotoFrame::sendData(uint8_t data) {
 }
 
 void EPDPhotoFrame::turnOnDisplay() {
-  ESP_LOGI(TAG, "Turning on display...");
-  
-  this->sendCommand(DRF);
+  ESP_LOGI(TAG, "Turning on display (PON -> DRF -> POF)...");
+
+  // POWER_ON
+  cs_all(this->cs_master_pin_, this->cs_slave_pin_, false);
+  this->sendCommand(PON);
+  cs_all(this->cs_master_pin_, this->cs_slave_pin_, true);
   this->waitForBusy();
-  
+
+  // Display Refresh with 0x00 parameter
+  delay(50);
+  cs_all(this->cs_master_pin_, this->cs_slave_pin_, false);
+  this->sendCommand(DRF);
+  this->sendData(0x00);
+  cs_all(this->cs_master_pin_, this->cs_slave_pin_, true);
+  this->waitForBusy();
+
+  // POWER_OFF with 0x00 parameter
+  cs_all(this->cs_master_pin_, this->cs_slave_pin_, false);
+  this->sendCommand(POF);
+  this->sendData(0x00);
+  cs_all(this->cs_master_pin_, this->cs_slave_pin_, true);
+
   ESP_LOGI(TAG, "Display update complete");
 }
 
 void EPDPhotoFrame::waitForBusy() {
   ESP_LOGD(TAG, "Waiting for display to be ready...");
-  while (this->busy_pin_->digital_read()) {
+  const uint32_t start_ms = millis();
+  // Original firmware: LOW = busy, HIGH = idle
+  while (!this->busy_pin_->digital_read()) {
+    App.feed_wdt();
     delay(10);
+    if (millis() - start_ms > 15000) {  // 15s timeout to avoid WDT reset
+      ESP_LOGW(TAG, "Busy wait timed out after 15000 ms; proceeding");
+      break;
+    }
   }
-  ESP_LOGD(TAG, "Display ready");
+  delay(20);
+  ESP_LOGD(TAG, "Display ready (busy=%d)", this->busy_pin_->digital_read());
 }
 
 void EPDPhotoFrame::resetDisplay() {
   ESP_LOGD(TAG, "Resetting display...");
   this->reset_pin_->digital_write(false);
-  delay(200);
+  delay(10);
   this->reset_pin_->digital_write(true);
-  delay(200);
+  delay(10);
 }
 
 void EPDPhotoFrame::powerOn() {
   ESP_LOGD(TAG, "Powering on display...");
   this->power_pin_->digital_write(true);
-  delay(1000);
+  delay(100);
 }
 
 void EPDPhotoFrame::powerOff() {
