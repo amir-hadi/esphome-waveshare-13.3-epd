@@ -10,17 +10,19 @@ from esphome.const import (
     CONF_RESET_PIN,
     CONF_DC_PIN,
     CONF_BUSY_PIN,
-    CONF_POWER_PIN,
-    CONF_CS_MASTER_PIN,
-    CONF_CS_SLAVE_PIN,
-    CONF_IMAGE_URL,
     CONF_UPDATE_INTERVAL,
 )
 from esphome.cpp_helpers import gpio_pin_expression
 
 CODEOWNERS = ["@ahadi"]
 DEPENDENCIES = ["spi", "display"]
-AUTO_LOAD = ["display"]
+AUTO_LOAD = ["display", "http_request", "wifi"]
+
+# Define component-specific config keys that are not in esphome.const
+CONF_POWER_PIN = "power_pin"
+CONF_CS_MASTER_PIN = "cs_master_pin"
+CONF_CS_SLAVE_PIN = "cs_slave_pin"
+CONF_IMAGE_URL = "image_url"
 
 epd_photo_frame_ns = cg.esphome_ns.namespace("epd_photo_frame")
 EPDPhotoFrame = epd_photo_frame_ns.class_(

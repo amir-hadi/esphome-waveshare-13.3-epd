@@ -1,6 +1,7 @@
 """
-ESPHome component for EPD Photo Frame with Spectra6 e-paper display.
-Supports downloading and displaying images from URLs.
+ESPHome display platform file for EPD Photo Frame.
+This mirrors the config from component.py so ESPHome can import
+epd_photo_frame.display as a display platform.
 """
 
 import esphome.codegen as cg
@@ -13,14 +14,13 @@ from esphome.const import (
     CONF_BUSY_PIN,
     CONF_UPDATE_INTERVAL,
 )
-from esphome.core import CORE
 from esphome.cpp_helpers import gpio_pin_expression
 
 CODEOWNERS = ["@ahadi"]
 DEPENDENCIES = ["spi", "display"]
-AUTO_LOAD = ["display"]
+AUTO_LOAD = ["display", "http_request", "wifi"]
 
-# Define component-specific config keys that are not in esphome.const
+# Component-specific keys
 CONF_POWER_PIN = "power_pin"
 CONF_CS_MASTER_PIN = "cs_master_pin"
 CONF_CS_SLAVE_PIN = "cs_slave_pin"
