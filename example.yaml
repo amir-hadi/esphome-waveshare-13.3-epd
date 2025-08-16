@@ -83,12 +83,22 @@ display:
       name: "EPD Download Status"
       entity_category: diagnostic
 
-# Manual refresh button entity
 button:
   - platform: template
-    name: "Refresh Display"
+    name: "EPD Download Image"
+    icon: mdi:download
     on_press:
-      - lambda: 'id(epd_display).refresh();'
+      then:
+        - lambda: |-
+            id(epd_display).startDownload();
+
+  - platform: template
+    name: "EPD Refresh From File"
+    icon: mdi:image-refresh
+    on_press:
+      then:
+        - lambda: |-
+            id(epd_display).displayFromFile();
 
 # Lightweight web server to accept binary uploads
 web_server:
