@@ -1,0 +1,102 @@
+# Example ESPHome configuration for EPD Photo Frame
+# This file shows how to configure the custom EPD Photo Frame component
+
+esphome:
+  name: epd_photo_frame
+  friendly_name: EPD Photo Frame
+  platform: ESP32
+  board: esp32dev
+
+# WiFi configuration
+wifi:
+  ssid: "YourWiFiSSID"
+  password: "YourWiFiPassword"
+  
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "EPD-PhotoFrame-Fallback"
+    password: "12345678"
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+
+# Enable OTA updates
+ota:
+  password: "admin"
+
+# Enable time component for scheduling
+time:
+  - platform: sntp
+    id: sntp_time
+
+# SPI configuration for the e-paper display
+spi:
+  clk_pin: GPIO13
+  mosi_pin: GPIO14
+
+# EPD Photo Frame component
+display:
+  - platform: epd_photo_frame
+    id: epd_display
+    reset_pin: GPIO26
+    dc_pin: GPIO27
+    busy_pin: GPIO25
+    power_pin: GPIO33
+    cs_master_pin: GPIO18
+    cs_slave_pin: GPIO22
+    image_url: "http://10.0.0.253:8080/image.bin"
+    update_interval: 30min
+
+# Optional: Add a button to manually trigger image refresh
+button:
+  - platform: gpio
+    name: "Refresh Image"
+    pin: GPIO32  # Touch sensor pin from your original firmware
+    on_press:
+      - display.refresh: epd_display
+
+# Optional: Add a sensor to show WiFi signal strength
+sensor:
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 60s
+
+# Optional: Add a binary sensor for WiFi connection status
+binary_sensor:
+  - platform: status
+    name: "WiFi Status"
+
+# Optional: Add a text sensor to show the current image URL
+text_sensor:
+  - platform: wifi_info
+    ip_address:
+      name: "IP Address"
+    ssid:
+      name: "WiFi SSID"
+
+# Optional: Add automation to refresh display at specific times
+automation:
+  - trigger:
+      platform: time
+      at: "06:00:00"
+    action:
+      - display.refresh: epd_display
+      - delay: 5s
+      - logger.log: "Display refreshed at 6 AM"
+  
+  - trigger:
+      platform: time
+      at: "18:00:00"
+    action:
+      - display.refresh: epd_display
+      - delay: 5s
+      - logger.log: "Display refreshed at 6 PM"
+
+# Optional: Add deep sleep configuration for power saving
+# Note: This may interfere with the display update cycle
+# deep_sleep:
+#   run_duration: 30min
+#   sleep_duration: 30min
