@@ -8,13 +8,14 @@
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
 #include "esphome/core/time.h"
-#include "esphome/components/http_request/http_request.h"
-#include "esphome/components/wifi/wifi_component.h"
+// Networking and HTTP client functionality is intentionally not used directly here
+// to keep the component self-contained for compilation. Image download can be
+// implemented via automations or future integrations.
 
 namespace esphome {
 namespace epd_photo_frame {
 
-class EPDPhotoFrame : public PollingComponent, public display::DisplayBuffer, public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARITY_LOW, spi::CLOCK_PHASE_LEADING, spi::DATA_RATE_4MHZ> {
+class EPDPhotoFrame : public display::DisplayBuffer, public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARITY_LOW, spi::CLOCK_PHASE_LEADING, spi::DATA_RATE_4MHZ> {
  public:
   void set_reset_pin(GPIOPin *reset_pin) { reset_pin_ = reset_pin; }
   void set_dc_pin(GPIOPin *dc_pin) { dc_pin_ = dc_pin; }
@@ -33,10 +34,12 @@ class EPDPhotoFrame : public PollingComponent, public display::DisplayBuffer, pu
   // Display buffer interface
   int get_width_internal() override { return 1200; }
   int get_height_internal() override { return 1600; }
+  void draw_absolute_pixel_internal(int x, int y, Color color) override;
+  display::DisplayType get_display_type() override;
 
   // Custom methods
   void downloadAndDisplayImage();
-  void displayImageFromFlash();
+  bool displayImageFromFlash();
   void clearDisplay();
   void sleepDisplay();
   void wakeDisplay();
@@ -52,6 +55,7 @@ class EPDPhotoFrame : public PollingComponent, public display::DisplayBuffer, pu
   void sendData(uint8_t data);
   void initDisplay();
   void turnOnDisplay();
+  void sendImageData();
   
   // Image handling
   bool downloadImage();

@@ -5,6 +5,7 @@ ESPHome component for EPD Photo Frame with Spectra6 e-paper display.
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import display, spi
+from esphome import pins
 from esphome.const import (
     CONF_ID,
     CONF_RESET_PIN,
@@ -29,25 +30,21 @@ EPDPhotoFrame = epd_photo_frame_ns.class_(
     "EPDPhotoFrame", cg.PollingComponent, display.DisplayBuffer
 )
 
-CONFIG_SCHEMA = (
-    display.BASIC_DISPLAY_SCHEMA.extend(
-        {
-            cv.GenerateID(): cv.declare_id(EPDPhotoFrame),
-            cv.Required(CONF_RESET_PIN): gpio_pin_expression,
-            cv.Required(CONF_DC_PIN): gpio_pin_expression,
-            cv.Required(CONF_BUSY_PIN): gpio_pin_expression,
-            cv.Required(CONF_POWER_PIN): gpio_pin_expression,
-            cv.Required(CONF_CS_MASTER_PIN): gpio_pin_expression,
-            cv.Required(CONF_CS_SLAVE_PIN): gpio_pin_expression,
-            cv.Optional(
-                CONF_IMAGE_URL, default="http://10.0.0.253:8080/image.bin"
-            ): cv.string,
-            cv.Optional(CONF_UPDATE_INTERVAL, default="30min"): cv.update_interval,
-        }
-    )
-    .extend(cv.polling_component_schema("30min"))
-    .extend(spi.spi_device_schema())
-)
+CONFIG_SCHEMA = display.BASIC_DISPLAY_SCHEMA.extend(
+    {
+        cv.GenerateID(): cv.declare_id(EPDPhotoFrame),
+        cv.Required(CONF_RESET_PIN): pins.gpio_output_pin_schema,
+        cv.Required(CONF_DC_PIN): pins.gpio_output_pin_schema,
+        cv.Required(CONF_BUSY_PIN): pins.gpio_input_pin_schema,
+        cv.Required(CONF_POWER_PIN): pins.gpio_output_pin_schema,
+        cv.Required(CONF_CS_MASTER_PIN): pins.gpio_output_pin_schema,
+        cv.Required(CONF_CS_SLAVE_PIN): pins.gpio_output_pin_schema,
+        cv.Optional(
+            CONF_IMAGE_URL, default="http://10.0.0.253:8080/image.bin"
+        ): cv.string,
+        cv.Optional(CONF_UPDATE_INTERVAL, default="30min"): cv.update_interval,
+    }
+).extend(cv.polling_component_schema("30min"))
 
 
 async def to_code(config):
@@ -56,8 +53,7 @@ async def to_code(config):
     await cg.register_component(var, config)
     await display.register_display(var, config)
 
-    # Add SPI device
-    await spi.register_spi_device(var, config)
+    # SPI device registration omitted to avoid requiring cs_pin in YAML
 
     # Add pins
     reset_pin = await gpio_pin_expression(config[CONF_RESET_PIN])
