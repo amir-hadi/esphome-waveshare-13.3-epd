@@ -5,6 +5,9 @@
 #include "esphome/components/display/display_buffer.h"
 #include "esphome/components/spi/spi.h"
 #include "esphome/components/web_server_base/web_server_base.h"
+#include "esphome/components/sensor/sensor.h"
+#include "esphome/components/binary_sensor/binary_sensor.h"
+#include "esphome/components/text_sensor/text_sensor.h"
 #include <stdio.h>
 #include <string>
 #include "freertos/FreeRTOS.h"
@@ -31,6 +34,11 @@ class EPDPhotoFrame : public display::DisplayBuffer, public spi::SPIDevice<spi::
   void set_image_url(const std::string &image_url) { image_url_ = image_url; }
   void set_update_interval(uint32_t update_interval) { update_interval_ = update_interval; }
   void assign_spi_parent(spi::SPIComponent *parent) { this->set_spi_parent(parent); }
+
+  // Optional HA entities for reporting download results
+  void set_download_bytes_sensor(sensor::Sensor *s) { download_bytes_sensor_ = s; }
+  void set_download_success_binary(binary_sensor::BinarySensor *b) { download_success_binary_ = b; }
+  void set_download_status_text(text_sensor::TextSensor *t) { download_status_text_ = t; }
 
   void setup() override;
   void dump_config() override;
@@ -115,6 +123,11 @@ class EPDPhotoFrame : public display::DisplayBuffer, public spi::SPIDevice<spi::
   bool display_initialized_{false};
   bool image_downloaded_{false};
   bool display_updated_{false};
+  
+  // Optional entities
+  sensor::Sensor *download_bytes_sensor_{nullptr};
+  binary_sensor::BinarySensor *download_success_binary_{nullptr};
+  text_sensor::TextSensor *download_status_text_{nullptr};
   
   static const int SCREEN_WIDTH = 1200;
   static const int SCREEN_HEIGHT = 1600;

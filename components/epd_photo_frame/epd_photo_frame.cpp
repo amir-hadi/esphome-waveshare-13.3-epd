@@ -161,16 +161,38 @@ void EPDPhotoFrame::run_download_task() {
   cfg.method = HTTP_METHOD_GET;
   cfg.transport_type = HTTP_TRANSPORT_OVER_TCP;
   esp_http_client_handle_t client = esp_http_client_init(&cfg);
-  if (!client) { ESP_LOGE(TAG, "client init failed"); return; }
-  if (esp_http_client_open(client, 0) != ESP_OK) { ESP_LOGE(TAG, "open failed"); esp_http_client_cleanup(client); return; }
+  if (!client) {
+    ESP_LOGE(TAG, "client init failed");
+    if (download_success_binary_) download_success_binary_->publish_state(false);
+    if (download_status_text_) download_status_text_->publish_state("init_failed");
+    return;
+  }
+  if (esp_http_client_open(client, 0) != ESP_OK) {
+    ESP_LOGE(TAG, "open failed");
+    if (download_success_binary_) download_success_binary_->publish_state(false);
+    if (download_status_text_) download_status_text_->publish_state("open_failed");
+    esp_http_client_cleanup(client);
+    return;
+  }
   esp_http_client_fetch_headers(client);
   FILE *fp = fopen(path, "wb");
-  if (!fp) { ESP_LOGE(TAG, "open %s failed", path); esp_http_client_close(client); esp_http_client_cleanup(client); return; }
+  if (!fp) {
+    ESP_LOGE(TAG, "open %s failed", path);
+    if (download_success_binary_) download_success_binary_->publish_state(false);
+    if (download_status_text_) download_status_text_->publish_state("file_open_failed");
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+    return;
+  }
   uint8_t buf[1024];
   int total = 0;
   while (true) {
     int r = esp_http_client_read(client, (char *) buf, sizeof(buf));
-    if (r < 0) { ESP_LOGE(TAG, "read err %d", r); break; }
+    if (r < 0) {
+      ESP_LOGE(TAG, "read err %d", r);
+      if (download_status_text_) download_status_text_->publish_state("read_err:" + to_string(r));
+      break;
+    }
     if (r == 0) break;
     fwrite(buf, 1, r, fp);
     total += r;
@@ -181,6 +203,15 @@ void EPDPhotoFrame::run_download_task() {
   esp_http_client_close(client);
   esp_http_client_cleanup(client);
   ESP_LOGI(TAG, "DL task done: %d bytes", total);
+  if (download_bytes_sensor_) download_bytes_sensor_->publish_state(total);
+  const int expected = (SCREEN_WIDTH * SCREEN_HEIGHT) / 2; // 960000
+  if (total == expected) {
+    if (download_success_binary_) download_success_binary_->publish_state(true);
+    if (download_status_text_) download_status_text_->publish_state("ok");
+  } else {
+    if (download_success_binary_) download_success_binary_->publish_state(false);
+    if (download_status_text_) download_status_text_->publish_state("incomplete");
+  }
 }
 
 void EPDPhotoFrame::dump_config() {

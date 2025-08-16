@@ -71,6 +71,17 @@ display:
     cs_slave_pin: GPIO22
     image_url: "http://10.0.0.253:8080/image.bin"
     update_interval: 30min
+    download_success:
+      name: "EPD Download Success"
+      entity_category: diagnostic
+
+    download_bytes:
+      name: "EPD Download Bytes"
+      entity_category: diagnostic
+
+    download_status:
+      name: "EPD Download Status"
+      entity_category: diagnostic
 
 # Manual refresh button entity
 button:

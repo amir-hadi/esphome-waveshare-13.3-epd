@@ -6,7 +6,7 @@ epd_photo_frame.display as a display platform.
 
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.components import display, spi
+from esphome.components import display, spi, sensor, binary_sensor, text_sensor
 from esphome import pins
 from esphome.const import (
     CONF_ID,
@@ -19,7 +19,15 @@ from esphome.cpp_helpers import gpio_pin_expression
 
 CODEOWNERS = ["@ahadi"]
 DEPENDENCIES = ["spi", "display"]
-AUTO_LOAD = ["display", "http_request", "wifi", "web_server_base"]
+AUTO_LOAD = [
+    "display",
+    "http_request",
+    "wifi",
+    "web_server_base",
+    "sensor",
+    "binary_sensor",
+    "text_sensor",
+]
 
 # Component-specific keys
 CONF_POWER_PIN = "power_pin"
@@ -47,6 +55,12 @@ CONFIG_SCHEMA = display.BASIC_DISPLAY_SCHEMA.extend(
             CONF_IMAGE_URL, default="http://10.0.0.253:8080/image.bin"
         ): cv.string,
         cv.Optional(CONF_UPDATE_INTERVAL, default="30min"): cv.update_interval,
+        # Optional reporting entities
+        cv.Optional("download_bytes"): sensor.sensor_schema(
+            unit_of_measurement="B", accuracy_decimals=0
+        ),
+        cv.Optional("download_success"): binary_sensor.binary_sensor_schema(),
+        cv.Optional("download_status"): text_sensor.text_sensor_schema(),
     }
 ).extend(cv.polling_component_schema("30min"))
 
@@ -85,3 +99,14 @@ async def to_code(config):
     # Set update interval
     if CONF_UPDATE_INTERVAL in config:
         cg.add(var.set_update_interval(config[CONF_UPDATE_INTERVAL]))
+
+    # Optional entities
+    if "download_bytes" in config:
+        bytes_sensor = await sensor.new_sensor(config["download_bytes"])
+        cg.add(var.set_download_bytes_sensor(bytes_sensor))
+    if "download_success" in config:
+        success_bin = await binary_sensor.new_binary_sensor(config["download_success"])
+        cg.add(var.set_download_success_binary(success_bin))
+    if "download_status" in config:
+        status_txt = await text_sensor.new_text_sensor(config["download_status"])
+        cg.add(var.set_download_status_text(status_txt))
