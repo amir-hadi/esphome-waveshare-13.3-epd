@@ -39,7 +39,8 @@ void EPDPhotoFrame::setup() {
   this->dc_pin_->digital_write(false);
   this->cs_master_pin_->digital_write(true);
   this->cs_slave_pin_->digital_write(true);
-  this->power_pin_->digital_write(false);
+  // Match GPIO_Config: power on by default
+  this->power_pin_->digital_write(true);
   
   // Initialize SPI
   this->spi_setup();
@@ -121,7 +122,7 @@ bool EPDPhotoFrame::downloadFileToSpiffs(const std::string &url, const char *pat
     if (r == 0) break;
     fwrite(buf, 1, r, fp);
     total += r;
-    if ((total & 0x3FFF) == 0) App.feed_wdt();
+    if ((total & 0x0FFF) == 0) { App.feed_wdt(); delay(1); }
   }
   fclose(fp);
   esp_http_client_close(client);
@@ -131,10 +132,8 @@ bool EPDPhotoFrame::downloadFileToSpiffs(const std::string &url, const char *pat
 }
 
 void EPDPhotoFrame::startDownload() {
-  ESP_LOGI(TAG, "Start download from %s", image_url_.c_str());
-  if (this->downloadFileToSpiffs(image_url_, "/spiffs/image.bin")) {
-    ESP_LOGI(TAG, "Download done");
-  }
+  ESP_LOGI(TAG, "Start download (background) from %s", image_url_.c_str());
+  xTaskCreatePinnedToCore(&EPDPhotoFrame::download_task_trampoline, "epd_dl", 4096, this, 5, nullptr, 0);
 }
 
 void EPDPhotoFrame::displayFromFile() {
@@ -144,6 +143,44 @@ void EPDPhotoFrame::displayFromFile() {
   } else {
     ESP_LOGE(TAG, "Display from file failed");
   }
+}
+
+void EPDPhotoFrame::download_task_trampoline(void *param) {
+  auto *self = reinterpret_cast<EPDPhotoFrame *>(param);
+  self->run_download_task();
+  vTaskDelete(nullptr);
+}
+
+void EPDPhotoFrame::run_download_task() {
+  if (!this->mountSpiffs()) return;
+  const char *path = "/spiffs/image.bin";
+  ESP_LOGI(TAG, "DL task: %s -> %s", this->image_url_.c_str(), path);
+  esp_http_client_config_t cfg = {};
+  cfg.url = this->image_url_.c_str();
+  cfg.timeout_ms = 15000;
+  cfg.method = HTTP_METHOD_GET;
+  cfg.transport_type = HTTP_TRANSPORT_OVER_TCP;
+  esp_http_client_handle_t client = esp_http_client_init(&cfg);
+  if (!client) { ESP_LOGE(TAG, "client init failed"); return; }
+  if (esp_http_client_open(client, 0) != ESP_OK) { ESP_LOGE(TAG, "open failed"); esp_http_client_cleanup(client); return; }
+  esp_http_client_fetch_headers(client);
+  FILE *fp = fopen(path, "wb");
+  if (!fp) { ESP_LOGE(TAG, "open %s failed", path); esp_http_client_close(client); esp_http_client_cleanup(client); return; }
+  uint8_t buf[1024];
+  int total = 0;
+  while (true) {
+    int r = esp_http_client_read(client, (char *) buf, sizeof(buf));
+    if (r < 0) { ESP_LOGE(TAG, "read err %d", r); break; }
+    if (r == 0) break;
+    fwrite(buf, 1, r, fp);
+    total += r;
+    // Yield to avoid WDT on other tasks; don't reset WDT from this task
+    vTaskDelay(pdMS_TO_TICKS(1));
+  }
+  fclose(fp);
+  esp_http_client_close(client);
+  esp_http_client_cleanup(client);
+  ESP_LOGI(TAG, "DL task done: %d bytes", total);
 }
 
 void EPDPhotoFrame::dump_config() {
@@ -263,7 +300,7 @@ void EPDPhotoFrame::sendImageData() {
 void EPDPhotoFrame::initDisplay() {
   ESP_LOGI(TAG, "Initializing EPD display...");
 
-  // Reset sequence (mirror original firmware)
+  // Reset sequence (mirror original firmware more closely)
   this->reset_pin_->digital_write(true);
   delay(30);
   this->reset_pin_->digital_write(false);
@@ -394,19 +431,23 @@ void EPDPhotoFrame::turnOnDisplay() {
   cs_all(this->cs_master_pin_, this->cs_slave_pin_, true);
   this->waitForBusy();
 
-  // Display Refresh with 0x00 parameter
+  // Display Refresh
   delay(50);
   cs_all(this->cs_master_pin_, this->cs_slave_pin_, false);
   this->sendCommand(DRF);
+  // Match reference: DRF takes a single 0x00 parameter
   this->sendData(0x00);
   cs_all(this->cs_master_pin_, this->cs_slave_pin_, true);
   this->waitForBusy();
 
-  // POWER_OFF with 0x00 parameter
+  // POWER_OFF
   cs_all(this->cs_master_pin_, this->cs_slave_pin_, false);
   this->sendCommand(POF);
+  // Match reference: POF takes a single 0x00 parameter
   this->sendData(0x00);
   cs_all(this->cs_master_pin_, this->cs_slave_pin_, true);
+  // Reference waits for busy release after POF as well
+  this->waitForBusy();
 
   ESP_LOGI(TAG, "Display update complete");
 }
@@ -418,8 +459,8 @@ void EPDPhotoFrame::waitForBusy() {
   while (!this->busy_pin_->digital_read()) {
     App.feed_wdt();
     delay(10);
-    if (millis() - start_ms > 15000) {  // 15s timeout to avoid WDT reset
-      ESP_LOGW(TAG, "Busy wait timed out after 15000 ms; proceeding");
+    if (millis() - start_ms > 60000) {  // 60s timeout to avoid WDT reset
+      ESP_LOGW(TAG, "Busy wait timed out after 60000 ms; proceeding");
       break;
     }
   }
@@ -594,12 +635,14 @@ bool esphome::epd_photo_frame::EPDPhotoFrame::sendImageDataFromFile(const char *
   ESP_LOGI("epd_photo_frame", "Sending image from %s", path);
 
   // Master half
+  ESP_LOGI(TAG, "Master half start");
   this->cs_master_pin_->digital_write(false);
   this->sendCommand(DTM);
   this->dc_pin_->digital_write(true);
   this->enable();
   uint8_t row_buf[BYTES_PER_ROW / 2];
   for (int line = 0; line < SCREEN_HEIGHT; line++) {
+    // Read master half of this row
     size_t r = fread(row_buf, 1, sizeof(row_buf), fp);
     if (r != sizeof(row_buf)) {
       fclose(fp);
@@ -608,18 +651,40 @@ bool esphome::epd_photo_frame::EPDPhotoFrame::sendImageDataFromFile(const char *
       return false;
     }
     this->write_array(row_buf, sizeof(row_buf));
+    // Discard slave half of this row to maintain alignment
+    if (fread(row_buf, 1, sizeof(row_buf), fp) != sizeof(row_buf)) {
+      fclose(fp);
+      this->disable();
+      this->cs_master_pin_->digital_write(true);
+      return false;
+    }
+    delay(1);
     if ((line & 0x1F) == 0) App.feed_wdt();
+    if ((line % 100) == 0) {
+      ESP_LOGI(TAG, "Master row %d/%d", line, SCREEN_HEIGHT);
+    }
   }
   this->disable();
   this->cs_master_pin_->digital_write(true);
-  delay(20);
+  delay(50);
 
   // Slave half
+  ESP_LOGI(TAG, "Slave half start");
+  // Restart file from beginning for slave half
+  fseek(fp, 0, SEEK_SET);
   this->cs_slave_pin_->digital_write(false);
   this->sendCommand(DTM);
   this->dc_pin_->digital_write(true);
   this->enable();
   for (int line = 0; line < SCREEN_HEIGHT; line++) {
+    // Discard master half of this row
+    if (fread(row_buf, 1, sizeof(row_buf), fp) != sizeof(row_buf)) {
+      fclose(fp);
+      this->disable();
+      this->cs_slave_pin_->digital_write(true);
+      return false;
+    }
+    // Read and send slave half of this row
     size_t r = fread(row_buf, 1, sizeof(row_buf), fp);
     if (r != sizeof(row_buf)) {
       fclose(fp);
@@ -628,7 +693,11 @@ bool esphome::epd_photo_frame::EPDPhotoFrame::sendImageDataFromFile(const char *
       return false;
     }
     this->write_array(row_buf, sizeof(row_buf));
+    delay(1);
     if ((line & 0x1F) == 0) App.feed_wdt();
+    if ((line % 100) == 0) {
+      ESP_LOGI(TAG, "Slave row %d/%d", line, SCREEN_HEIGHT);
+    }
   }
   this->disable();
   this->cs_slave_pin_->digital_write(true);

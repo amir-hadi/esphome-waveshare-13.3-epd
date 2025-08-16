@@ -7,6 +7,8 @@
 #include "esphome/components/web_server_base/web_server_base.h"
 #include <stdio.h>
 #include <string>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "esphome/core/gpio.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
@@ -18,7 +20,7 @@
 namespace esphome {
 namespace epd_photo_frame {
 
-class EPDPhotoFrame : public display::DisplayBuffer, public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARITY_LOW, spi::CLOCK_PHASE_LEADING, spi::DATA_RATE_4MHZ>, public web_server_idf::AsyncWebHandler {
+class EPDPhotoFrame : public display::DisplayBuffer, public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARITY_LOW, spi::CLOCK_PHASE_LEADING, spi::DATA_RATE_2MHZ>, public web_server_idf::AsyncWebHandler {
  public:
   void set_reset_pin(GPIOPin *reset_pin) { reset_pin_ = reset_pin; }
   void set_dc_pin(GPIOPin *dc_pin) { dc_pin_ = dc_pin; }
@@ -28,7 +30,7 @@ class EPDPhotoFrame : public display::DisplayBuffer, public spi::SPIDevice<spi::
   void set_cs_slave_pin(GPIOPin *cs_slave_pin) { cs_slave_pin_ = cs_slave_pin; }
   void set_image_url(const std::string &image_url) { image_url_ = image_url; }
   void set_update_interval(uint32_t update_interval) { update_interval_ = update_interval; }
-  void assign_spi_parent(spi::SPIComponent *parent) { spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARITY_LOW, spi::CLOCK_PHASE_LEADING, spi::DATA_RATE_4MHZ>::set_spi_parent(parent); }
+  void assign_spi_parent(spi::SPIComponent *parent) { this->set_spi_parent(parent); }
 
   void setup() override;
   void dump_config() override;
@@ -75,6 +77,10 @@ class EPDPhotoFrame : public display::DisplayBuffer, public spi::SPIDevice<spi::
   bool loadImageFromFlash();
   bool downloadFileToSpiffs(const std::string &url, const char *path);
   bool mountSpiffs();
+
+  // Background download task
+  static void download_task_trampoline(void *param);
+  void run_download_task();
   bool sendImageDataFromFile(const char *path);
   
   // Helper methods
