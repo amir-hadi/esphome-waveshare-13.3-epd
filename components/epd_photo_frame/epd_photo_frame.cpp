@@ -4,6 +4,9 @@
 #include <string>
 #include "esphome/core/application.h"
 #include "esphome/core/util.h"
+#include "esphome/components/web_server_base/web_server_base.h"
+#include <esp_http_client.h>
+#include <esp_spiffs.h>
 
 namespace esphome {
 namespace epd_photo_frame {
@@ -13,6 +16,11 @@ static const char *const TAG = "epd_photo_frame";
 static inline void cs_all(esphome::GPIOPin *cs_m, esphome::GPIOPin *cs_s, bool level_high) {
   cs_m->digital_write(level_high);
   cs_s->digital_write(level_high);
+}
+
+static bool read_exact(FILE *fp, uint8_t *buf, size_t len) {
+  size_t off = 0; while (off < len) { size_t r = fread(buf + off, 1, len - off, fp); if (r == 0) return false; off += r; }
+  return true;
 }
 
 void EPDPhotoFrame::setup() {
@@ -39,7 +47,103 @@ void EPDPhotoFrame::setup() {
   // Initialize display
   this->initDisplay();
   
+  // SPIFFS will be mounted on first use
+  spiffs_mounted_ = false;
+
+  // Register HTTP upload handler
+  if (web_server_base::global_web_server_base) {
+    web_server_base::global_web_server_base->add_handler(this);
+    ESP_LOGCONFIG(TAG, "Registered /epd/upload handler");
+  }
+
   ESP_LOGCONFIG(TAG, "EPD Photo Frame setup complete");
+}
+bool EPDPhotoFrame::mountSpiffs() {
+  if (spiffs_mounted_) return true;
+  esp_vfs_spiffs_conf_t conf = {
+      .base_path = "/spiffs",
+      .partition_label = nullptr,
+      .max_files = 4,
+      .format_if_mount_failed = true,
+  };
+  esp_err_t ret = esp_vfs_spiffs_register(&conf);
+  if (ret != ESP_OK) {
+    ESP_LOGE(TAG, "SPIFFS mount failed: %d", (int) ret);
+    return false;
+  }
+  size_t total = 0, used = 0;
+  if (esp_spiffs_info(nullptr, &total, &used) == ESP_OK) {
+    ESP_LOGI(TAG, "SPIFFS total=%u used=%u", (unsigned) total, (unsigned) used);
+  }
+  spiffs_mounted_ = true;
+  return true;
+}
+
+bool EPDPhotoFrame::downloadFileToSpiffs(const std::string &url, const char *path) {
+  ESP_LOGI(TAG, "Downloading %s -> %s", url.c_str(), path);
+  if (!this->mountSpiffs()) {
+    ESP_LOGE(TAG, "SPIFFS not mounted");
+    return false;
+  }
+  esp_http_client_config_t cfg = {};
+  cfg.url = url.c_str();
+  cfg.timeout_ms = 15000;
+  cfg.method = HTTP_METHOD_GET;
+  cfg.transport_type = HTTP_TRANSPORT_OVER_TCP;
+  esp_http_client_handle_t client = esp_http_client_init(&cfg);
+  if (client == nullptr) {
+    ESP_LOGE(TAG, "http_client_init failed");
+    return false;
+  }
+  esp_err_t err = esp_http_client_open(client, 0);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "http_client_open failed: %d", (int) err);
+    esp_http_client_cleanup(client);
+    return false;
+  }
+  int status = esp_http_client_fetch_headers(client);
+  if (status >= 0) {
+    int cl = esp_http_client_get_content_length(client);
+    ESP_LOGI(TAG, "HTTP headers ok, content-length=%d", cl);
+  }
+  FILE *fp = fopen(path, "wb");
+  if (!fp) {
+    ESP_LOGE(TAG, "Open failed: %s", path);
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+    return false;
+  }
+  uint8_t buf[2048];
+  int total = 0;
+  while (true) {
+    int r = esp_http_client_read(client, (char *) buf, sizeof(buf));
+    if (r < 0) { ESP_LOGE(TAG, "http read error: %d", r); fclose(fp); esp_http_client_close(client); esp_http_client_cleanup(client); return false; }
+    if (r == 0) break;
+    fwrite(buf, 1, r, fp);
+    total += r;
+    if ((total & 0x3FFF) == 0) App.feed_wdt();
+  }
+  fclose(fp);
+  esp_http_client_close(client);
+  esp_http_client_cleanup(client);
+  ESP_LOGI(TAG, "Saved %d bytes to %s", total, path);
+  return total > 0;
+}
+
+void EPDPhotoFrame::startDownload() {
+  ESP_LOGI(TAG, "Start download from %s", image_url_.c_str());
+  if (this->downloadFileToSpiffs(image_url_, "/spiffs/image.bin")) {
+    ESP_LOGI(TAG, "Download done");
+  }
+}
+
+void EPDPhotoFrame::displayFromFile() {
+  ESP_LOGI(TAG, "Display from /spiffs/image.bin");
+  if (this->sendImageDataFromFile("/spiffs/image.bin")) {
+    this->turnOnDisplay();
+  } else {
+    ESP_LOGE(TAG, "Display from file failed");
+  }
 }
 
 void EPDPhotoFrame::dump_config() {
@@ -117,43 +221,43 @@ bool EPDPhotoFrame::displayImageFromFlash() {
 }
 
 bool EPDPhotoFrame::loadImageFromFlash() {
-  // This would load the image data from flash
-  // For now, just return true
-  return true;
+  // For now use in-memory upload buffer if present
+  return !upload_buffer_.empty();
 }
 
 void EPDPhotoFrame::sendImageData() {
   ESP_LOGI(TAG, "Sending image data to display...");
-  
-  // Master half
-  this->cs_master_pin_->digital_write(false);
-  this->sendCommand(DTM);
-  this->dc_pin_->digital_write(true);
-  
-  // Send image data row by row (simplified)
-  for (int line = 0; line < SCREEN_HEIGHT; line++) {
-    // In a real implementation, you'd read from flash and send the data
-    // For now, just send dummy data
-    for (int k = 0; k < BYTES_PER_ROW / 2; k++) {
-      this->sendData(0xFF); // White pixels
+
+  auto send_half = [this](GPIOPin *cs_pin, const uint8_t *start_ptr) {
+
+    cs_pin->digital_write(false);
+    this->sendCommand(DTM);
+    this->dc_pin_->digital_write(true);
+    this->enable();
+    for (int line = 0; line < SCREEN_HEIGHT; line++) {
+      const uint8_t *row = start_ptr + (line * BYTES_PER_ROW / 2);
+      this->write_array(row, BYTES_PER_ROW / 2);
+      if ((line & 0x1F) == 0) App.feed_wdt();
     }
+    this->disable();
+    cs_pin->digital_write(true);
+  };
+  const uint8_t *base = upload_buffer_.empty() ? nullptr : upload_buffer_.data();
+  if (base == nullptr) {
+    ESP_LOGW(TAG, "No image buffer; sending white screen");
+    static uint8_t white[BYTES_PER_ROW / 2];
+    memset(white, 0xFF, sizeof(white));
+    // fallback: white both halves
+    send_half(this->cs_master_pin_, white);
+    delay(20);
+    send_half(this->cs_slave_pin_, white);
+    return;
   }
-  
-  this->cs_master_pin_->digital_write(true);
-  delay(50);
-  
-  // Slave half
-  this->cs_slave_pin_->digital_write(false);
-  this->sendCommand(DTM);
-  this->dc_pin_->digital_write(true);
-  
-  for (int line = 0; line < SCREEN_HEIGHT; line++) {
-    for (int k = 0; k < BYTES_PER_ROW / 2; k++) {
-      this->sendData(0xFF); // White pixels
-    }
-  }
-  
-  this->cs_slave_pin_->digital_write(true);
+
+  // Left(master) half is first 300 bytes per row, right(slave) half is next 300
+  send_half(this->cs_master_pin_, base);
+  delay(20);
+  send_half(this->cs_slave_pin_, base + (BYTES_PER_ROW / 2));
 }
 
 void EPDPhotoFrame::initDisplay() {
@@ -388,6 +492,150 @@ display::DisplayType EPDPhotoFrame::get_display_type() {
   return display::DISPLAY_TYPE_BINARY; // placeholder
 }
 
+bool EPDPhotoFrame::canHandle(web_server_idf::AsyncWebServerRequest *request) const {
+  return (request->method() == HTTP_POST && request->url() == "/epd/upload") ||
+         (request->method() == HTTP_POST && request->url() == "/upload");
+}
+
+void EPDPhotoFrame::handleRequest(web_server_idf::AsyncWebServerRequest *request) {
+  // For POST with body, we finalize in handleBody(). If there is a body, do nothing here.
+  // If we reached here, either multipart upload is used (handled via handleUpload) or body will arrive in handleBody.
+  // Send 100-continue-like acceptance by not responding here.
+  ESP_LOGD(TAG, "handleRequest entry for %s (len=%u)", request->url().c_str(), (unsigned) request->contentLength());
+}
+
+void EPDPhotoFrame::handleBody(web_server_idf::AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+  if (index == 0) {
+    // Start streaming: initialize state and set up for master half
+    streaming_upload_ = true;
+    upload_expected_total_ = total;
+    upload_complete_ = false;
+    current_row_ = 0;
+    row_fill_ = 0;
+    master_dtm_sent_ = false;
+    slave_dtm_sent_ = false;
+    upload_expected_total_ = total;
+    upload_complete_ = false;
+    ESP_LOGI(TAG, "Upload start: total=%u", (unsigned) total);
+    // Open SPIFFS file for write
+    upload_fp_ = fopen("/spiffs/image.bin", "wb");
+    if (!upload_fp_) {
+      request->send(500, "text/plain", "Open failed");
+      return;
+    }
+    upload_bytes_written_ = 0;
+  }
+  // Stream incoming bytes to file; we will render from file after upload
+  size_t offset = 0;
+  while (offset < len) {
+    size_t to_write = len - offset;
+    size_t w = fwrite(data + offset, 1, to_write, upload_fp_);
+    offset += w;
+    if (w == 0) break;
+    upload_bytes_written_ += w;
+    if ((offset & 0xFFF) == 0) App.feed_wdt();
+  }
+  ESP_LOGD(TAG, "Upload chunk wrote: len=%u", (unsigned) len);
+  if (index + len >= total) {
+    long pos = ftell(upload_fp_);
+    fclose(upload_fp_);
+    upload_fp_ = nullptr;
+    ESP_LOGI(TAG, "Upload finalize file size=%ld", pos);
+    if (pos == (long)(1200 * 1600 / 2)) {
+      request->send(200, "text/plain", "OK");
+      // Render from file
+      if (!this->sendImageDataFromFile("/spiffs/image.bin")) {
+        ESP_LOGE(TAG, "Failed to send image from file");
+      }
+      this->turnOnDisplay();
+    } else {
+      request->send(400, "text/plain", "Invalid size");
+    }
+  }
+}
+
+void EPDPhotoFrame::handleUpload(web_server_idf::AsyncWebServerRequest *request, const std::string &filename, size_t index, uint8_t *data, size_t len, bool final) {
+  if (index == 0) {
+    ESP_LOGI(TAG, "Multipart upload start: %s total=%u", filename.c_str(), (unsigned) request->contentLength());
+    upload_fp_ = fopen("/spiffs/image.bin", "wb");
+    upload_bytes_written_ = 0;
+    if (!upload_fp_) {
+      request->send(500, "text/plain", "Open failed");
+      return;
+    }
+  }
+  if (upload_fp_ && len > 0) {
+    fwrite(data, 1, len, upload_fp_);
+    upload_bytes_written_ += len;
+  }
+  if (final) {
+    fclose(upload_fp_);
+    upload_fp_ = nullptr;
+    ESP_LOGI(TAG, "Multipart upload finalize size=%u", (unsigned) upload_bytes_written_);
+    if (upload_bytes_written_ == (size_t)(1200 * 1600 / 2)) {
+      request->send(200, "text/plain", "OK");
+      if (!this->sendImageDataFromFile("/spiffs/image.bin")) {
+        ESP_LOGE(TAG, "Failed to send image from file");
+      }
+      this->turnOnDisplay();
+    } else {
+      request->send(400, "text/plain", "Invalid size");
+    }
+  }
+}
+
+
+bool esphome::epd_photo_frame::EPDPhotoFrame::sendImageDataFromFile(const char *path) {
+  FILE *fp = fopen(path, "rb");
+  if (!fp) {
+    ESP_LOGE("epd_photo_frame", "Failed to open %s", path);
+    return false;
+  }
+  ESP_LOGI("epd_photo_frame", "Sending image from %s", path);
+
+  // Master half
+  this->cs_master_pin_->digital_write(false);
+  this->sendCommand(DTM);
+  this->dc_pin_->digital_write(true);
+  this->enable();
+  uint8_t row_buf[BYTES_PER_ROW / 2];
+  for (int line = 0; line < SCREEN_HEIGHT; line++) {
+    size_t r = fread(row_buf, 1, sizeof(row_buf), fp);
+    if (r != sizeof(row_buf)) {
+      fclose(fp);
+      this->disable();
+      this->cs_master_pin_->digital_write(true);
+      return false;
+    }
+    this->write_array(row_buf, sizeof(row_buf));
+    if ((line & 0x1F) == 0) App.feed_wdt();
+  }
+  this->disable();
+  this->cs_master_pin_->digital_write(true);
+  delay(20);
+
+  // Slave half
+  this->cs_slave_pin_->digital_write(false);
+  this->sendCommand(DTM);
+  this->dc_pin_->digital_write(true);
+  this->enable();
+  for (int line = 0; line < SCREEN_HEIGHT; line++) {
+    size_t r = fread(row_buf, 1, sizeof(row_buf), fp);
+    if (r != sizeof(row_buf)) {
+      fclose(fp);
+      this->disable();
+      this->cs_slave_pin_->digital_write(true);
+      return false;
+    }
+    this->write_array(row_buf, sizeof(row_buf));
+    if ((line & 0x1F) == 0) App.feed_wdt();
+  }
+  this->disable();
+  this->cs_slave_pin_->digital_write(true);
+  fclose(fp);
+  ESP_LOGI("epd_photo_frame", "Image data sent from file");
+  return true;
+}
 
 
 }  // namespace epd_photo_frame

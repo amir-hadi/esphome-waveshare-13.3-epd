@@ -19,7 +19,7 @@ from esphome.cpp_helpers import gpio_pin_expression
 
 CODEOWNERS = ["@ahadi"]
 DEPENDENCIES = ["spi", "display"]
-AUTO_LOAD = ["display", "http_request", "wifi"]
+AUTO_LOAD = ["display", "http_request", "wifi", "web_server_base"]
 
 # Component-specific keys
 CONF_POWER_PIN = "power_pin"

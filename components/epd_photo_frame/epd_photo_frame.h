@@ -4,6 +4,9 @@
 #include "esphome/core/defines.h"
 #include "esphome/components/display/display_buffer.h"
 #include "esphome/components/spi/spi.h"
+#include "esphome/components/web_server_base/web_server_base.h"
+#include <stdio.h>
+#include <string>
 #include "esphome/core/gpio.h"
 #include "esphome/core/helpers.h"
 #include "esphome/core/log.h"
@@ -15,7 +18,7 @@
 namespace esphome {
 namespace epd_photo_frame {
 
-class EPDPhotoFrame : public display::DisplayBuffer, public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARITY_LOW, spi::CLOCK_PHASE_LEADING, spi::DATA_RATE_4MHZ> {
+class EPDPhotoFrame : public display::DisplayBuffer, public spi::SPIDevice<spi::BIT_ORDER_MSB_FIRST, spi::CLOCK_POLARITY_LOW, spi::CLOCK_PHASE_LEADING, spi::DATA_RATE_4MHZ>, public web_server_idf::AsyncWebHandler {
  public:
   void set_reset_pin(GPIOPin *reset_pin) { reset_pin_ = reset_pin; }
   void set_dc_pin(GPIOPin *dc_pin) { dc_pin_ = dc_pin; }
@@ -37,6 +40,12 @@ class EPDPhotoFrame : public display::DisplayBuffer, public spi::SPIDevice<spi::
   int get_height_internal() override { return 1600; }
   void draw_absolute_pixel_internal(int x, int y, Color color) override;
   display::DisplayType get_display_type() override;
+  // Web upload handler
+  bool canHandle(web_server_idf::AsyncWebServerRequest *request) const override;
+  void handleRequest(web_server_idf::AsyncWebServerRequest *request) override;
+  void handleBody(web_server_idf::AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) override;
+  void handleUpload(web_server_idf::AsyncWebServerRequest *request, const std::string &filename, size_t index, uint8_t *data, size_t len, bool final) override;
+  bool isRequestHandlerTrivial() const override { return false; }
 
   // Custom methods
   void downloadAndDisplayImage();
@@ -44,6 +53,8 @@ class EPDPhotoFrame : public display::DisplayBuffer, public spi::SPIDevice<spi::
   void clearDisplay();
   void sleepDisplay();
   void wakeDisplay();
+  void startDownload();
+  void displayFromFile();
   
   // Service calls
   void refresh();
@@ -62,6 +73,9 @@ class EPDPhotoFrame : public display::DisplayBuffer, public spi::SPIDevice<spi::
   bool downloadImage();
   bool saveImageToFlash();
   bool loadImageFromFlash();
+  bool downloadFileToSpiffs(const std::string &url, const char *path);
+  bool mountSpiffs();
+  bool sendImageDataFromFile(const char *path);
   
   // Helper methods
   void waitForBusy();
@@ -78,6 +92,19 @@ class EPDPhotoFrame : public display::DisplayBuffer, public spi::SPIDevice<spi::
   
   std::string image_url_;
   uint32_t update_interval_{1800000}; // 30 minutes default
+  std::vector<uint8_t> upload_buffer_;
+  bool upload_complete_{false};
+  size_t upload_expected_total_{0};
+  // Streaming upload state
+  bool streaming_upload_{false};
+  int current_row_{0};
+  int row_fill_{0};
+  uint8_t row_buffer_[600]{}; // BYTES_PER_ROW
+  bool master_dtm_sent_{false};
+  bool slave_dtm_sent_{false};
+  FILE *upload_fp_{nullptr};
+  bool spiffs_mounted_{false};
+  size_t upload_bytes_written_{0};
   
   bool display_initialized_{false};
   bool image_downloaded_{false};

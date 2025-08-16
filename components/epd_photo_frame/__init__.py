@@ -19,7 +19,7 @@ from esphome.cpp_helpers import gpio_pin_expression
 
 CODEOWNERS = ["@ahadi"]
 DEPENDENCIES = ["spi", "display"]
-AUTO_LOAD = ["display"]
+AUTO_LOAD = ["display", "web_server_base", "web_server"]
 
 # Define component-specific config keys that are not in esphome.const
 CONF_POWER_PIN = "power_pin"
