@@ -31,9 +31,6 @@ class EPDPhotoFrame : public PollingComponent, public display::DisplayBuffer, pu
   void loop() override;
 
   // Display buffer interface
-  void fill(Color color) override;
-  void fill_rect(int x1, int y1, int width, int height, Color color) override;
-  void draw_pixel_at(int x, int y, Color color) override;
   int get_width_internal() override { return 1200; }
   int get_height_internal() override { return 1600; }
 

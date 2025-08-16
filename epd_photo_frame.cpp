@@ -317,23 +317,7 @@ void EPDPhotoFrame::setImageUrl(const std::string &url) {
   this->downloadAndDisplayImage();
 }
 
-// Display buffer interface implementations
-void EPDPhotoFrame::fill(Color color) {
-  // This would fill the display buffer with the specified color
-  // For now, just log
-  ESP_LOGD(TAG, "Fill display with color: %02X%02X%02X", color.r, color.g, color.b);
-}
 
-void EPDPhotoFrame::fill_rect(int x1, int y1, int width, int height, Color color) {
-  // This would fill a rectangle in the display buffer
-  ESP_LOGD(TAG, "Fill rect (%d,%d,%d,%d) with color: %02X%02X%02X", 
-            x1, y1, width, height, color.r, color.g, color.b);
-}
-
-void EPDPhotoFrame::draw_pixel_at(int x, int y, Color color) {
-  // This would set a pixel in the display buffer
-  ESP_LOGD(TAG, "Set pixel (%d,%d) to color: %02X%02X%02X", x, y, color.r, color.g, color.b);
-}
 
 }  // namespace epd_photo_frame
 }  // namespace esphome
