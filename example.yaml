@@ -34,6 +34,26 @@ ota:
   - platform: esphome
     password: "b90f12e39aade3f5a99cc36c909af902"
 
+# Time sync for scheduling sleep-until
+time:
+  - platform: sntp
+    id: sntp_time
+
+# Native ESPHome datetime picker (renders in HA UI)
+datetime:
+  - platform: template
+    type: datetime
+    id: wake_datetime
+    name: "EPD Wake At"
+    time_id: sntp_time
+    optimistic: true
+
+# Manual deep sleep control (sleep only when triggered)
+deep_sleep:
+  id: epd_sleep
+  # wakeup_pin: GPIO32
+  # wakeup_pin_mode: IGNORE
+
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
@@ -83,6 +103,25 @@ display:
       name: "EPD Download Status"
       entity_category: diagnostic
 
+# Scheduling knobs
+number:
+  - platform: template
+    id: wake_interval_minutes
+    name: "EPD Wake Interval (min)"
+    min_value: 1
+    max_value: 1440
+    step: 1
+    optimistic: true
+    entity_category: config
+  - platform: template
+    id: wake_epoch
+    name: "EPD Wake Epoch (s)"
+    min_value: 0
+    max_value: 4102444800
+    step: 1
+    optimistic: true
+    entity_category: config
+
 button:
   - platform: template
     name: "EPD Download Image"
@@ -99,6 +138,58 @@ button:
       then:
         - lambda: |-
             id(epd_display).displayFromFile();
+
+  - platform: template
+    id: epd_sleep_interval_btn
+    name: "EPD Sleep (Interval)"
+    icon: mdi:sleep
+    on_press:
+      then:
+        - deep_sleep.enter:
+            id: epd_sleep
+            sleep_duration: !lambda |-
+              float mins = id(wake_interval_minutes).state;
+              if (mins < 0.0167f) mins = 0.0167f;  // >= 1s
+              return (uint32_t)(mins * 60.0f * 1000.0f);
+
+  - platform: template
+    id: epd_sleep_until_epoch_btn
+    name: "EPD Sleep (Until Epoch)"
+    icon: mdi:calendar-clock
+    on_press:
+      then:
+        - deep_sleep.enter:
+            id: epd_sleep
+            sleep_duration: !lambda |-
+              auto now = id(sntp_time).now();
+              if (!now.is_valid()) return (uint32_t)60000; // 60s fallback
+              int64_t diff_s = (int64_t) id(wake_epoch).state - (int64_t) now.timestamp;
+              if (diff_s < 1) diff_s = 1;
+              if (diff_s > 3600LL*24LL*30LL) diff_s = 3600LL*24LL*30LL; // clamp 30 days
+              return (uint32_t)(diff_s * 1000ULL);
+
+  - platform: template
+    name: "EPD Sleep (Until Picker)"
+    icon: mdi:calendar-range
+    on_press:
+      then:
+        - deep_sleep.enter:
+            id: epd_sleep
+            sleep_duration: !lambda |-
+              auto now = id(sntp_time).now();
+              if (!now.is_valid()) return (uint32_t)60000; // 60s fallback
+              auto tgt = id(wake_datetime).state_as_esptime();
+              // If picker not set, default 60s
+              if (tgt.year == 0) return (uint32_t)60000;
+              int64_t diff_s = (int64_t) tgt.timestamp - (int64_t) now.timestamp;
+              if (diff_s < 1) diff_s = 1;
+              if (diff_s > 3600LL*24LL*30LL) diff_s = 3600LL*24LL*30LL; // clamp 30 days
+              return (uint32_t)(diff_s * 1000ULL);
+
+binary_sensor:
+  - platform: status
+    id: epd_status
+    name: "Photo Frame Status"   # must set a name so HA exposes it
 
 # Lightweight web server to accept binary uploads
 web_server:

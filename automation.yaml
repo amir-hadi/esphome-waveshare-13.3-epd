@@ -1,0 +1,57 @@
+alias: EPD on wake → OTA, daily 03:00 refresh, schedule next 30-min wake
+description: ""
+triggers:
+  - entity_id:
+      - binary_sensor.photo_frame_photo_frame_status
+    for:
+      hours: 0
+      minutes: 0
+      seconds: 3
+    trigger: state
+    to: "on"
+actions:
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ update_entity and states(update_entity) == 'on' }}"
+        sequence:
+          - target:
+              entity_id: "{{ update_entity }}"
+            action: update.install
+            data: {}
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ now().hour == 3 and now().minute == 0 }}"
+        sequence:
+          - action: esphome.photo_frame_download_image
+            data: {}
+          - wait_template: "{{ is_state(download_ok, 'on') }}"
+            timeout: "00:03:00"
+            continue_on_timeout: true
+          - choose:
+              - conditions:
+                  - condition: template
+                    value_template: "{{ is_state(download_ok, 'on') }}"
+                sequence:
+                  - action: esphome.photo_frame_display_image
+                    data: {}
+  - target:
+      entity_id: "{{ wake_epoch_number }}"
+    data:
+      value: >
+        {% set n = now() %} {% set base = n.replace(minute=0, second=0,
+        microsecond=0) %} {% set add = 30 if n.minute < 30 else 60 %} {{
+        as_timestamp(base + timedelta(minutes=add)) | int }}
+    action: number.set_value
+  - delay: "00:00:02"
+  - target:
+      entity_id: "{{ sleep_button }}"
+    action: button.press
+    data: {}
+mode: single
+variables:
+  update_entity: update.photo_frame_firmware
+  download_ok: binary_sensor.photo_frame_epd_download_success
+  sleep_button: button.photo_frame_epd_sleep_until_epoch
+  wake_epoch_number: number.photo_frame_epd_wake_epoch_s
