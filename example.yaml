@@ -11,11 +11,6 @@ esphome:
           condition: wifi.connected
           timeout: 30s
       - wait_until:
-          condition:
-            time.has_time:
-              id: sntp_time
-          timeout: 30s
-      - wait_until:
           condition: api.connected
           timeout: 20s
       # Start background download and wait for success
@@ -35,20 +30,12 @@ esphome:
       - lambda: |-
           id(epd_display).sleepDisplay();
       - delay: 200ms
-      # Wait briefly for HA to push next wake epoch
-      - wait_until:
-          condition:
-            lambda: |-
-              auto now = id(sntp_time).now();
-              if (!now.is_valid()) return false;
-              return ((int32_t) id(wake_epoch).state) > now.timestamp;
-          timeout: 10s
-      # Sleep for configured minutes (from number.wake_interval_minutes)
+      # Sleep for configured minutes
       - deep_sleep.enter:
           id: epd_sleep
           sleep_duration: !lambda |-
             float mins = id(wake_interval_minutes).state;
-            if (mins < 0.0167f) mins = 1.0f;  // min 1s fallback
+            if (mins < 0.0167f) mins = 1.0f;  // min ~1s
             if (mins > (30.0f * 24.0f * 60.0f)) mins = (30.0f * 24.0f * 60.0f);  // clamp 30d
             return (uint32_t)(mins * 60.0f * 1000.0f);
 
@@ -89,14 +76,7 @@ time:
   - platform: sntp
     id: sntp_time
 
-# Native ESPHome datetime picker (renders in HA UI)
-datetime:
-  - platform: template
-    type: datetime
-    id: wake_datetime
-    name: "EPD Wake At"
-    time_id: sntp_time
-    optimistic: true
+  # keep for logs if needed; not required for interval sleep
 
 # Manual deep sleep control (sleep only when triggered)
 deep_sleep:
@@ -156,7 +136,6 @@ display:
       name: "EPD Download Status"
       entity_category: diagnostic
 
-# Scheduling knobs
 number:
   - platform: template
     id: wake_interval_minutes
@@ -166,16 +145,8 @@ number:
     step: 1
     optimistic: true
     entity_category: config
-    initial_value: 1440
+    initial_value: 240
     restore_value: true
-  - platform: template
-    id: wake_epoch
-    name: "EPD Wake Epoch (s)"
-    min_value: 0
-    max_value: 4102444800
-    step: 1
-    optimistic: true
-    entity_category: config
 
 button:
   - platform: template
@@ -207,49 +178,12 @@ button:
               if (mins < 0.0167f) mins = 0.0167f;  // >= 1s
               return (uint32_t)(mins * 60.0f * 1000.0f);
 
-  - platform: template
-    id: epd_sleep_until_epoch_btn
-    name: "EPD Sleep (Until Epoch)"
-    icon: mdi:calendar-clock
-    on_press:
-      then:
-        - deep_sleep.enter:
-            id: epd_sleep
-            sleep_duration: !lambda |-
-              auto now = id(sntp_time).now();
-              if (!now.is_valid()) return (uint32_t)60000; // 60s fallback
-              int64_t diff_s = (int64_t) id(wake_epoch).state - (int64_t) now.timestamp;
-              if (diff_s < 1) diff_s = 1;
-              if (diff_s > 3600LL*24LL*30LL) diff_s = 3600LL*24LL*30LL; // clamp 30 days
-              return (uint32_t)(diff_s * 1000ULL);
-
-  - platform: template
-    name: "EPD Sleep (Until Picker)"
-    icon: mdi:calendar-range
-    on_press:
-      then:
-        - deep_sleep.enter:
-            id: epd_sleep
-            sleep_duration: !lambda |-
-              auto now = id(sntp_time).now();
-              if (!now.is_valid()) return (uint32_t)60000; // 60s fallback
-              auto tgt = id(wake_datetime).state_as_esptime();
-              // If picker not set, default 60s
-              if (tgt.year == 0) return (uint32_t)60000;
-              int64_t diff_s = (int64_t) tgt.timestamp - (int64_t) now.timestamp;
-              if (diff_s < 1) diff_s = 1;
-              if (diff_s > 3600LL*24LL*30LL) diff_s = 3600LL*24LL*30LL; // clamp 30 days
-              return (uint32_t)(diff_s * 1000ULL);
-
 binary_sensor:
   - platform: status
     id: epd_status
     name: "Photo Frame Status"   # must set a name so HA exposes it
 
-# Lightweight web server to accept binary uploads
-web_server:
-  port: 80
-  include_internal: true
+
 
 ## Optional: Add a text sensor to show current image URL (commented to keep build minimal)
 # text_sensor:

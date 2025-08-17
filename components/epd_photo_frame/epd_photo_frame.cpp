@@ -4,7 +4,6 @@
 #include <string>
 #include "esphome/core/application.h"
 #include "esphome/core/util.h"
-#include "esphome/components/web_server_base/web_server_base.h"
 #include <esp_http_client.h>
 #include <esp_spiffs.h>
 
@@ -51,11 +50,7 @@ void EPDPhotoFrame::setup() {
   // SPIFFS will be mounted on first use
   spiffs_mounted_ = false;
 
-  // Register HTTP upload handler
-  if (web_server_base::global_web_server_base) {
-    web_server_base::global_web_server_base->add_handler(this);
-    ESP_LOGCONFIG(TAG, "Registered /epd/upload handler");
-  }
+  // No web upload handlers anymore; downloads are performed from backend via HTTP client
 
   ESP_LOGCONFIG(TAG, "EPD Photo Frame setup complete");
 }
@@ -80,156 +75,6 @@ bool EPDPhotoFrame::mountSpiffs() {
   return true;
 }
 
-bool EPDPhotoFrame::downloadFileToSpiffs(const std::string &url, const char *path) {
-  ESP_LOGI(TAG, "Downloading %s -> %s", url.c_str(), path);
-  if (!this->mountSpiffs()) {
-    ESP_LOGE(TAG, "SPIFFS not mounted");
-    return false;
-  }
-  esp_http_client_config_t cfg = {};
-  cfg.url = url.c_str();
-  cfg.timeout_ms = 15000;
-  cfg.method = HTTP_METHOD_GET;
-  cfg.transport_type = HTTP_TRANSPORT_OVER_TCP;
-  esp_http_client_handle_t client = esp_http_client_init(&cfg);
-  if (client == nullptr) {
-    ESP_LOGE(TAG, "http_client_init failed");
-    return false;
-  }
-  esp_err_t err = esp_http_client_open(client, 0);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "http_client_open failed: %d", (int) err);
-    esp_http_client_cleanup(client);
-    return false;
-  }
-  int status = esp_http_client_fetch_headers(client);
-  if (status >= 0) {
-    int cl = esp_http_client_get_content_length(client);
-    ESP_LOGI(TAG, "HTTP headers ok, content-length=%d", cl);
-  }
-  FILE *fp = fopen(path, "wb");
-  if (!fp) {
-    ESP_LOGE(TAG, "Open failed: %s", path);
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
-    return false;
-  }
-  uint8_t buf[2048];
-  int total = 0;
-  while (true) {
-    int r = esp_http_client_read(client, (char *) buf, sizeof(buf));
-    if (r < 0) { ESP_LOGE(TAG, "http read error: %d", r); fclose(fp); esp_http_client_close(client); esp_http_client_cleanup(client); return false; }
-    if (r == 0) break;
-    fwrite(buf, 1, r, fp);
-    total += r;
-    if ((total & 0x0FFF) == 0) { App.feed_wdt(); delay(1); }
-  }
-  fclose(fp);
-  esp_http_client_close(client);
-  esp_http_client_cleanup(client);
-  ESP_LOGI(TAG, "Saved %d bytes to %s", total, path);
-  return total > 0;
-}
-
-bool EPDPhotoFrame::download_blocking() {
-  // Wrapper that runs the same logic synchronously on the main task
-  const char *path = "/spiffs/image.bin";
-  if (!this->mountSpiffs()) return false;
-  // Ensure previous file is removed to reclaim space
-  unlink(path);
-  // Check free space before attempting download
-  size_t total_bytes = 0, used_bytes = 0;
-  if (esp_spiffs_info(nullptr, &total_bytes, &used_bytes) == ESP_OK) {
-    int expected = (SCREEN_WIDTH * SCREEN_HEIGHT) / 2; // 960000
-    size_t free_bytes = (total_bytes > used_bytes) ? (total_bytes - used_bytes) : 0;
-    if (free_bytes < (size_t) expected + 4096) {
-      ESP_LOGW(TAG, "Not enough SPIFFS space: total=%u used=%u free=%u need~%u", (unsigned) total_bytes, (unsigned) used_bytes, (unsigned) free_bytes, (unsigned) (expected + 4096));
-      // Try formatting once to reclaim space
-      ESP_LOGW(TAG, "Formatting SPIFFS to reclaim space...");
-      esp_vfs_spiffs_unregister(nullptr);
-      esp_err_t fmt = esp_spiffs_format(nullptr);
-      if (fmt == ESP_OK) {
-        // Re-mount and re-check space
-        spiffs_mounted_ = false;
-        if (!this->mountSpiffs()) {
-          ESP_LOGE(TAG, "SPIFFS re-mount failed after format");
-          if (download_success_binary_) download_success_binary_->publish_state(false);
-          if (download_status_text_) download_status_text_->publish_state("spiffs_remount_failed");
-          return false;
-        }
-        size_t t2 = 0, u2 = 0;
-        if (esp_spiffs_info(nullptr, &t2, &u2) == ESP_OK) {
-          free_bytes = (t2 > u2) ? (t2 - u2) : 0;
-          if (free_bytes < (size_t) expected + 1024) {
-            ESP_LOGW(TAG, "Still not enough space after format: free=%u", (unsigned) free_bytes);
-            if (download_success_binary_) download_success_binary_->publish_state(false);
-            if (download_status_text_) download_status_text_->publish_state("no_space");
-            return false;
-          }
-        }
-      } else {
-        ESP_LOGE(TAG, "SPIFFS format failed: %d", (int) fmt);
-        if (download_success_binary_) download_success_binary_->publish_state(false);
-        if (download_status_text_) download_status_text_->publish_state("spiffs_format_failed");
-        return false;
-      }
-    }
-  }
-  esp_http_client_config_t cfg = {};
-  cfg.url = this->image_url_.c_str();
-  cfg.timeout_ms = 5000; // shorter to avoid long blocking on bad links
-  cfg.method = HTTP_METHOD_GET;
-  cfg.transport_type = HTTP_TRANSPORT_OVER_TCP;
-  esp_http_client_handle_t client = esp_http_client_init(&cfg);
-  if (!client) {
-    if (download_success_binary_) download_success_binary_->publish_state(false);
-    if (download_status_text_) download_status_text_->publish_state("init_failed");
-    return false;
-  }
-  if (esp_http_client_open(client, 0) != ESP_OK) {
-    if (download_success_binary_) download_success_binary_->publish_state(false);
-    if (download_status_text_) download_status_text_->publish_state("open_failed");
-    esp_http_client_cleanup(client);
-    return false;
-  }
-  esp_http_client_fetch_headers(client);
-  FILE *fp = fopen(path, "wb");
-  if (!fp) {
-    if (download_success_binary_) download_success_binary_->publish_state(false);
-    if (download_status_text_) download_status_text_->publish_state("file_open_failed");
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
-    return false;
-  }
-  uint8_t buf[1024];
-  int downloaded = 0;
-  while (true) {
-    int r = esp_http_client_read(client, (char *) buf, sizeof(buf));
-    if (r < 0) {
-      if (download_status_text_) download_status_text_->publish_state("read_err:" + to_string(r));
-      break;
-    }
-    if (r == 0) break;
-    fwrite(buf, 1, r, fp);
-    downloaded += r;
-    // Yield to avoid starving other tasks
-    App.feed_wdt();
-    delay(1);
-  }
-  fclose(fp);
-  esp_http_client_close(client);
-  esp_http_client_cleanup(client);
-  if (download_bytes_sensor_) download_bytes_sensor_->publish_state(downloaded);
-  const int expected = (SCREEN_WIDTH * SCREEN_HEIGHT) / 2;
-  if (downloaded == expected) {
-    if (download_success_binary_) download_success_binary_->publish_state(true);
-    if (download_status_text_) download_status_text_->publish_state("ok");
-    return true;
-  }
-  if (download_success_binary_) download_success_binary_->publish_state(false);
-  if (download_status_text_) download_status_text_->publish_state("incomplete");
-  return false;
-}
 void EPDPhotoFrame::startDownload() {
   ESP_LOGI(TAG, "Start download (background) from %s", image_url_.c_str());
   xTaskCreatePinnedToCore(&EPDPhotoFrame::download_task_trampoline, "epd_dl", 4096, this, 5, nullptr, 0);
@@ -384,99 +229,6 @@ void EPDPhotoFrame::loop() {
   // Handle any ongoing operations
 }
 
-void EPDPhotoFrame::downloadAndDisplayImage() {
-  ESP_LOGI(TAG, "Downloading and displaying image from: %s", this->image_url_.c_str());
-  
-  if (this->downloadImage()) {
-    ESP_LOGI(TAG, "Image downloaded successfully");
-    if (this->displayImageFromFlash()) {
-      ESP_LOGI(TAG, "Image displayed successfully");
-      this->display_updated_ = true;
-    } else {
-      ESP_LOGE(TAG, "Failed to display image");
-    }
-  } else {
-    ESP_LOGE(TAG, "Failed to download image");
-  }
-}
-
-bool EPDPhotoFrame::downloadImage() {
-  // Stubbed for compilation: in a full implementation, perform HTTP GET and save
-  // the data to flash, then set image_downloaded_.
-  ESP_LOGI(TAG, "Simulating image download from %s", this->image_url_.c_str());
-  this->image_downloaded_ = true;
-  return true;
-}
-
-bool EPDPhotoFrame::saveImageToFlash() {
-  // Stubbed: Implement flash write here
-  this->image_downloaded_ = true;
-  return true;
-}
-
-bool EPDPhotoFrame::displayImageFromFlash() {
-  if (!this->image_downloaded_) {
-    ESP_LOGW(TAG, "No image downloaded, cannot display");
-    return false;
-  }
-  
-  ESP_LOGI(TAG, "Displaying image from flash...");
-  
-  // Load image data from flash (simplified for now)
-  if (!this->loadImageFromFlash()) {
-    ESP_LOGE(TAG, "Failed to load image from flash");
-    return false;
-  }
-  
-  // Send image data to display
-  this->sendImageData();
-  
-  // Turn on display
-  this->turnOnDisplay();
-  
-  ESP_LOGI(TAG, "Image display complete");
-  return true;
-}
-
-bool EPDPhotoFrame::loadImageFromFlash() {
-  // For now use in-memory upload buffer if present
-  return !upload_buffer_.empty();
-}
-
-void EPDPhotoFrame::sendImageData() {
-  ESP_LOGI(TAG, "Sending image data to display...");
-
-  auto send_half = [this](GPIOPin *cs_pin, const uint8_t *start_ptr) {
-
-    cs_pin->digital_write(false);
-    this->sendCommand(DTM);
-    this->dc_pin_->digital_write(true);
-    this->enable();
-    for (int line = 0; line < SCREEN_HEIGHT; line++) {
-      const uint8_t *row = start_ptr + (line * BYTES_PER_ROW / 2);
-      this->write_array(row, BYTES_PER_ROW / 2);
-      if ((line & 0x1F) == 0) App.feed_wdt();
-    }
-    this->disable();
-    cs_pin->digital_write(true);
-  };
-  const uint8_t *base = upload_buffer_.empty() ? nullptr : upload_buffer_.data();
-  if (base == nullptr) {
-    ESP_LOGW(TAG, "No image buffer; sending white screen");
-    static uint8_t white[BYTES_PER_ROW / 2];
-    memset(white, 0xFF, sizeof(white));
-    // fallback: white both halves
-    send_half(this->cs_master_pin_, white);
-    delay(20);
-    send_half(this->cs_slave_pin_, white);
-    return;
-  }
-
-  // Left(master) half is first 300 bytes per row, right(slave) half is next 300
-  send_half(this->cs_master_pin_, base);
-  delay(20);
-  send_half(this->cs_slave_pin_, base + (BYTES_PER_ROW / 2));
-}
 
 void EPDPhotoFrame::initDisplay() {
   ESP_LOGI(TAG, "Initializing EPD display...");
@@ -668,19 +420,7 @@ void EPDPhotoFrame::powerOff() {
   this->power_pin_->digital_write(false);
 }
 
-void EPDPhotoFrame::clearDisplay() {
-  ESP_LOGI(TAG, "Clearing display...");
-  
-  this->sendCommand(DTM);
-  this->dc_pin_->digital_write(true);
-  
-  // Send white data to clear
-  for (int i = 0; i < SCREEN_WIDTH * SCREEN_HEIGHT / 2; i++) {
-    this->sendData(0xFF);
-  }
-  
-  this->turnOnDisplay();
-}
+// clearDisplay removed; not used in current flow
 
 void EPDPhotoFrame::sleepDisplay() {
   ESP_LOGI(TAG, "Putting display to sleep...");
@@ -689,21 +429,9 @@ void EPDPhotoFrame::sleepDisplay() {
   this->powerOff();
 }
 
-void EPDPhotoFrame::wakeDisplay() {
-  this->powerOn();
-  this->initDisplay();
-}
-
-void EPDPhotoFrame::refresh() {
-  ESP_LOGI(TAG, "Manual refresh requested");
-  this->downloadAndDisplayImage();
-}
-
 void EPDPhotoFrame::setImageUrl(const std::string &url) {
   ESP_LOGI(TAG, "Setting new image URL: %s", url.c_str());
   this->image_url_ = url;
-  // Optionally trigger a refresh with the new URL
-  this->downloadAndDisplayImage();
 }
 
 void EPDPhotoFrame::draw_absolute_pixel_internal(int x, int y, Color color) {
@@ -714,97 +442,6 @@ display::DisplayType EPDPhotoFrame::get_display_type() {
   return display::DISPLAY_TYPE_BINARY; // placeholder
 }
 
-bool EPDPhotoFrame::canHandle(web_server_idf::AsyncWebServerRequest *request) const {
-  return (request->method() == HTTP_POST && request->url() == "/epd/upload") ||
-         (request->method() == HTTP_POST && request->url() == "/upload");
-}
-
-void EPDPhotoFrame::handleRequest(web_server_idf::AsyncWebServerRequest *request) {
-  // For POST with body, we finalize in handleBody(). If there is a body, do nothing here.
-  // If we reached here, either multipart upload is used (handled via handleUpload) or body will arrive in handleBody.
-  // Send 100-continue-like acceptance by not responding here.
-  ESP_LOGD(TAG, "handleRequest entry for %s (len=%u)", request->url().c_str(), (unsigned) request->contentLength());
-}
-
-void EPDPhotoFrame::handleBody(web_server_idf::AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-  if (index == 0) {
-    // Start streaming: initialize state and set up for master half
-    streaming_upload_ = true;
-    upload_expected_total_ = total;
-    upload_complete_ = false;
-    current_row_ = 0;
-    row_fill_ = 0;
-    master_dtm_sent_ = false;
-    slave_dtm_sent_ = false;
-    upload_expected_total_ = total;
-    upload_complete_ = false;
-    ESP_LOGI(TAG, "Upload start: total=%u", (unsigned) total);
-    // Open SPIFFS file for write
-    upload_fp_ = fopen("/spiffs/image.bin", "wb");
-    if (!upload_fp_) {
-      request->send(500, "text/plain", "Open failed");
-      return;
-    }
-    upload_bytes_written_ = 0;
-  }
-  // Stream incoming bytes to file; we will render from file after upload
-  size_t offset = 0;
-  while (offset < len) {
-    size_t to_write = len - offset;
-    size_t w = fwrite(data + offset, 1, to_write, upload_fp_);
-    offset += w;
-    if (w == 0) break;
-    upload_bytes_written_ += w;
-    if ((offset & 0xFFF) == 0) App.feed_wdt();
-  }
-  ESP_LOGD(TAG, "Upload chunk wrote: len=%u", (unsigned) len);
-  if (index + len >= total) {
-    long pos = ftell(upload_fp_);
-    fclose(upload_fp_);
-    upload_fp_ = nullptr;
-    ESP_LOGI(TAG, "Upload finalize file size=%ld", pos);
-    if (pos == (long)(1200 * 1600 / 2)) {
-      request->send(200, "text/plain", "OK");
-      // Render from file
-      if (!this->sendImageDataFromFile("/spiffs/image.bin")) {
-        ESP_LOGE(TAG, "Failed to send image from file");
-      }
-      this->turnOnDisplay();
-    } else {
-      request->send(400, "text/plain", "Invalid size");
-    }
-  }
-}
-
-void EPDPhotoFrame::handleUpload(web_server_idf::AsyncWebServerRequest *request, const std::string &filename, size_t index, uint8_t *data, size_t len, bool final) {
-  if (index == 0) {
-    ESP_LOGI(TAG, "Multipart upload start: %s total=%u", filename.c_str(), (unsigned) request->contentLength());
-    upload_fp_ = fopen("/spiffs/image.bin", "wb");
-    upload_bytes_written_ = 0;
-    if (!upload_fp_) {
-      request->send(500, "text/plain", "Open failed");
-      return;
-    }
-  }
-  if (upload_fp_ && len > 0) {
-    fwrite(data, 1, len, upload_fp_);
-    upload_bytes_written_ += len;
-  }
-  if (final) {
-    fclose(upload_fp_);
-    upload_fp_ = nullptr;
-    ESP_LOGI(TAG, "Multipart upload finalize size=%u", (unsigned) upload_bytes_written_);
-    if (upload_bytes_written_ == (size_t)(1200 * 1600 / 2)) {
-      request->send(200, "text/plain", "OK");
-      if (!this->sendImageDataFromFile("/spiffs/image.bin")) {
-        ESP_LOGE(TAG, "Failed to send image from file");
-      }
-      this->turnOnDisplay();
-    } else {
-      request->send(400, "text/plain", "Invalid size");
-    }
-  }
-}
 
 
 bool esphome::epd_photo_frame::EPDPhotoFrame::sendImageDataFromFile(const char *path) {
