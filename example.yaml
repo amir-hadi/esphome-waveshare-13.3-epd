@@ -1,6 +1,56 @@
 esphome:
   name: photo-frame
   friendly_name: Photo Frame
+  project:
+    name: ahadi.epd_photo_frame
+    version: 1.0.0
+  on_boot:
+    priority: -100
+    then:
+      - wait_until:
+          condition: wifi.connected
+          timeout: 30s
+      - wait_until:
+          condition:
+            time.has_time:
+              id: sntp_time
+          timeout: 30s
+      - wait_until:
+          condition: api.connected
+          timeout: 20s
+      # Start background download and wait for success
+      - lambda: |-
+          id(epd_display).startDownload();
+      - wait_until:
+          condition:
+            binary_sensor.is_on: dl_ok
+          timeout: 180s
+      - if:
+          condition:
+            binary_sensor.is_on: dl_ok
+          then:
+            - lambda: |-
+                id(epd_display).displayFromFile();
+      # Power off display before deep sleep
+      - lambda: |-
+          id(epd_display).sleepDisplay();
+      - delay: 200ms
+      # Wait briefly for HA to push next wake epoch
+      - wait_until:
+          condition:
+            lambda: |-
+              auto now = id(sntp_time).now();
+              if (!now.is_valid()) return false;
+              return ((int32_t) id(wake_epoch).state) > now.timestamp;
+          timeout: 10s
+      # Sleep for configured minutes (from number.wake_interval_minutes)
+      - deep_sleep.enter:
+          id: epd_sleep
+          sleep_duration: !lambda |-
+            float mins = id(wake_interval_minutes).state;
+            if (mins < 0.0167f) mins = 1.0f;  // min 1s fallback
+            if (mins > (30.0f * 24.0f * 60.0f)) mins = (30.0f * 24.0f * 60.0f);  // clamp 30d
+            return (uint32_t)(mins * 60.0f * 1000.0f);
 
 esp32:
   board: esp32dev
@@ -92,14 +142,17 @@ display:
     image_url: "http://10.0.0.253:8080/image.bin"
     update_interval: 30min
     download_success:
+      id: dl_ok
       name: "EPD Download Success"
       entity_category: diagnostic
 
     download_bytes:
+      id: dl_bytes
       name: "EPD Download Bytes"
       entity_category: diagnostic
 
     download_status:
+      id: dl_status
       name: "EPD Download Status"
       entity_category: diagnostic
 
@@ -113,6 +166,8 @@ number:
     step: 1
     optimistic: true
     entity_category: config
+    initial_value: 1440
+    restore_value: true
   - platform: template
     id: wake_epoch
     name: "EPD Wake Epoch (s)"
