@@ -40,6 +40,9 @@ class EPDPhotoFrame : public display::DisplayBuffer, public spi::SPIDevice<spi::
   void set_download_success_binary(binary_sensor::BinarySensor *b) { download_success_binary_ = b; }
   void set_download_status_text(text_sensor::TextSensor *t) { download_status_text_ = t; }
 
+  // Synchronous download that blocks until finished
+  bool download_blocking();
+
   void setup() override;
   void dump_config() override;
   void update() override;

@@ -131,6 +131,105 @@ bool EPDPhotoFrame::downloadFileToSpiffs(const std::string &url, const char *pat
   return total > 0;
 }
 
+bool EPDPhotoFrame::download_blocking() {
+  // Wrapper that runs the same logic synchronously on the main task
+  const char *path = "/spiffs/image.bin";
+  if (!this->mountSpiffs()) return false;
+  // Ensure previous file is removed to reclaim space
+  unlink(path);
+  // Check free space before attempting download
+  size_t total_bytes = 0, used_bytes = 0;
+  if (esp_spiffs_info(nullptr, &total_bytes, &used_bytes) == ESP_OK) {
+    int expected = (SCREEN_WIDTH * SCREEN_HEIGHT) / 2; // 960000
+    size_t free_bytes = (total_bytes > used_bytes) ? (total_bytes - used_bytes) : 0;
+    if (free_bytes < (size_t) expected + 4096) {
+      ESP_LOGW(TAG, "Not enough SPIFFS space: total=%u used=%u free=%u need~%u", (unsigned) total_bytes, (unsigned) used_bytes, (unsigned) free_bytes, (unsigned) (expected + 4096));
+      // Try formatting once to reclaim space
+      ESP_LOGW(TAG, "Formatting SPIFFS to reclaim space...");
+      esp_vfs_spiffs_unregister(nullptr);
+      esp_err_t fmt = esp_spiffs_format(nullptr);
+      if (fmt == ESP_OK) {
+        // Re-mount and re-check space
+        spiffs_mounted_ = false;
+        if (!this->mountSpiffs()) {
+          ESP_LOGE(TAG, "SPIFFS re-mount failed after format");
+          if (download_success_binary_) download_success_binary_->publish_state(false);
+          if (download_status_text_) download_status_text_->publish_state("spiffs_remount_failed");
+          return false;
+        }
+        size_t t2 = 0, u2 = 0;
+        if (esp_spiffs_info(nullptr, &t2, &u2) == ESP_OK) {
+          free_bytes = (t2 > u2) ? (t2 - u2) : 0;
+          if (free_bytes < (size_t) expected + 1024) {
+            ESP_LOGW(TAG, "Still not enough space after format: free=%u", (unsigned) free_bytes);
+            if (download_success_binary_) download_success_binary_->publish_state(false);
+            if (download_status_text_) download_status_text_->publish_state("no_space");
+            return false;
+          }
+        }
+      } else {
+        ESP_LOGE(TAG, "SPIFFS format failed: %d", (int) fmt);
+        if (download_success_binary_) download_success_binary_->publish_state(false);
+        if (download_status_text_) download_status_text_->publish_state("spiffs_format_failed");
+        return false;
+      }
+    }
+  }
+  esp_http_client_config_t cfg = {};
+  cfg.url = this->image_url_.c_str();
+  cfg.timeout_ms = 5000; // shorter to avoid long blocking on bad links
+  cfg.method = HTTP_METHOD_GET;
+  cfg.transport_type = HTTP_TRANSPORT_OVER_TCP;
+  esp_http_client_handle_t client = esp_http_client_init(&cfg);
+  if (!client) {
+    if (download_success_binary_) download_success_binary_->publish_state(false);
+    if (download_status_text_) download_status_text_->publish_state("init_failed");
+    return false;
+  }
+  if (esp_http_client_open(client, 0) != ESP_OK) {
+    if (download_success_binary_) download_success_binary_->publish_state(false);
+    if (download_status_text_) download_status_text_->publish_state("open_failed");
+    esp_http_client_cleanup(client);
+    return false;
+  }
+  esp_http_client_fetch_headers(client);
+  FILE *fp = fopen(path, "wb");
+  if (!fp) {
+    if (download_success_binary_) download_success_binary_->publish_state(false);
+    if (download_status_text_) download_status_text_->publish_state("file_open_failed");
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+    return false;
+  }
+  uint8_t buf[1024];
+  int downloaded = 0;
+  while (true) {
+    int r = esp_http_client_read(client, (char *) buf, sizeof(buf));
+    if (r < 0) {
+      if (download_status_text_) download_status_text_->publish_state("read_err:" + to_string(r));
+      break;
+    }
+    if (r == 0) break;
+    fwrite(buf, 1, r, fp);
+    downloaded += r;
+    // Yield to avoid starving other tasks
+    App.feed_wdt();
+    delay(1);
+  }
+  fclose(fp);
+  esp_http_client_close(client);
+  esp_http_client_cleanup(client);
+  if (download_bytes_sensor_) download_bytes_sensor_->publish_state(downloaded);
+  const int expected = (SCREEN_WIDTH * SCREEN_HEIGHT) / 2;
+  if (downloaded == expected) {
+    if (download_success_binary_) download_success_binary_->publish_state(true);
+    if (download_status_text_) download_status_text_->publish_state("ok");
+    return true;
+  }
+  if (download_success_binary_) download_success_binary_->publish_state(false);
+  if (download_status_text_) download_status_text_->publish_state("incomplete");
+  return false;
+}
 void EPDPhotoFrame::startDownload() {
   ESP_LOGI(TAG, "Start download (background) from %s", image_url_.c_str());
   xTaskCreatePinnedToCore(&EPDPhotoFrame::download_task_trampoline, "epd_dl", 4096, this, 5, nullptr, 0);
@@ -155,57 +254,108 @@ void EPDPhotoFrame::run_download_task() {
   if (!this->mountSpiffs()) return;
   const char *path = "/spiffs/image.bin";
   ESP_LOGI(TAG, "DL task: %s -> %s", this->image_url_.c_str(), path);
-  esp_http_client_config_t cfg = {};
-  cfg.url = this->image_url_.c_str();
-  cfg.timeout_ms = 15000;
-  cfg.method = HTTP_METHOD_GET;
-  cfg.transport_type = HTTP_TRANSPORT_OVER_TCP;
-  esp_http_client_handle_t client = esp_http_client_init(&cfg);
-  if (!client) {
-    ESP_LOGE(TAG, "client init failed");
-    if (download_success_binary_) download_success_binary_->publish_state(false);
-    if (download_status_text_) download_status_text_->publish_state("init_failed");
-    return;
+  // Ensure previous file is removed and enough space exists
+  unlink(path);
+  size_t total_bytes = 0, used_bytes = 0;
+  if (esp_spiffs_info(nullptr, &total_bytes, &used_bytes) == ESP_OK) {
+    int expected = (SCREEN_WIDTH * SCREEN_HEIGHT) / 2; // 960000
+    size_t free_bytes = (total_bytes > used_bytes) ? (total_bytes - used_bytes) : 0;
+    if (free_bytes < (size_t) expected + 4096) {
+      ESP_LOGW(TAG, "Not enough SPIFFS space: total=%u used=%u free=%u need~%u", (unsigned) total_bytes, (unsigned) used_bytes, (unsigned) free_bytes, (unsigned) (expected + 4096));
+      ESP_LOGW(TAG, "Formatting SPIFFS to reclaim space (task)...");
+      esp_vfs_spiffs_unregister(nullptr);
+      if (esp_spiffs_format(nullptr) == ESP_OK) {
+        spiffs_mounted_ = false;
+        if (!this->mountSpiffs()) {
+          ESP_LOGE(TAG, "SPIFFS re-mount failed after format (task)");
+          if (download_success_binary_) download_success_binary_->publish_state(false);
+          if (download_status_text_) download_status_text_->publish_state("spiffs_remount_failed");
+          return;
+        }
+      } else {
+        ESP_LOGE(TAG, "SPIFFS format failed (task)");
+        if (download_success_binary_) download_success_binary_->publish_state(false);
+        if (download_status_text_) download_status_text_->publish_state("spiffs_format_failed");
+        return;
+      }
+    }
   }
-  if (esp_http_client_open(client, 0) != ESP_OK) {
-    ESP_LOGE(TAG, "open failed");
-    if (download_success_binary_) download_success_binary_->publish_state(false);
-    if (download_status_text_) download_status_text_->publish_state("open_failed");
-    esp_http_client_cleanup(client);
-    return;
-  }
-  esp_http_client_fetch_headers(client);
+  // Ranged download in 100KB chunks with up to 3 retries per chunk
+  const int expected = (SCREEN_WIDTH * SCREEN_HEIGHT) / 2; // 960000
+  const int chunk_size = 100 * 1024;
+  int downloaded_total = 0;
+  // Create/truncate file
   FILE *fp = fopen(path, "wb");
+  if (fp) fclose(fp);
+  fp = fopen(path, "rb+");
   if (!fp) {
     ESP_LOGE(TAG, "open %s failed", path);
     if (download_success_binary_) download_success_binary_->publish_state(false);
     if (download_status_text_) download_status_text_->publish_state("file_open_failed");
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
     return;
   }
-  uint8_t buf[1024];
-  int total = 0;
-  while (true) {
-    int r = esp_http_client_read(client, (char *) buf, sizeof(buf));
-    if (r < 0) {
-      ESP_LOGE(TAG, "read err %d", r);
-      if (download_status_text_) download_status_text_->publish_state("read_err:" + to_string(r));
-      break;
+  for (int start = 0; start < expected; start += chunk_size) {
+    int end = start + chunk_size - 1;
+    if (end >= expected) end = expected - 1;
+    const int need = end - start + 1;
+    int attempt = 0;
+    bool chunk_ok = false;
+    while (attempt < 3 && !chunk_ok) {
+      attempt++;
+      esp_http_client_config_t cfg = {};
+      cfg.url = this->image_url_.c_str();
+      cfg.timeout_ms = 5000;
+      cfg.method = HTTP_METHOD_GET;
+      cfg.transport_type = HTTP_TRANSPORT_OVER_TCP;
+      esp_http_client_handle_t client = esp_http_client_init(&cfg);
+      if (!client) { ESP_LOGW(TAG, "client init failed (chunk %d)", start); break; }
+      char range[64];
+      snprintf(range, sizeof(range), "bytes=%d-%d", start, end);
+      esp_http_client_set_header(client, "Range", range);
+      if (esp_http_client_open(client, 0) != ESP_OK) {
+        ESP_LOGW(TAG, "open failed (chunk %d try %d)", start, attempt);
+        esp_http_client_cleanup(client);
+        vTaskDelay(pdMS_TO_TICKS(50));
+        continue;
+      }
+      esp_http_client_fetch_headers(client);
+      // Position file and stream
+      fseek(fp, start, SEEK_SET);
+      int got = 0;
+      uint8_t buf[1024];
+      while (got < need) {
+        int to_read = need - got;
+        if (to_read > (int) sizeof(buf)) to_read = sizeof(buf);
+        int r = esp_http_client_read(client, (char *) buf, to_read);
+        if (r < 0) { ESP_LOGW(TAG, "read err %d (chunk %d)", r, start); break; }
+        if (r == 0) break;
+        fwrite(buf, 1, r, fp);
+        got += r;
+        // Yield so other tasks run
+        vTaskDelay(pdMS_TO_TICKS(1));
+      }
+      esp_http_client_close(client);
+      esp_http_client_cleanup(client);
+      if (got == need) {
+        chunk_ok = true;
+        downloaded_total += got;
+      } else {
+        ESP_LOGW(TAG, "chunk %d-%d incomplete got=%d need=%d (attempt %d)", start, end, got, need, attempt);
+        vTaskDelay(pdMS_TO_TICKS(100));
+      }
     }
-    if (r == 0) break;
-    fwrite(buf, 1, r, fp);
-    total += r;
-    // Yield to avoid WDT on other tasks; don't reset WDT from this task
-    vTaskDelay(pdMS_TO_TICKS(1));
+    if (!chunk_ok) {
+      fclose(fp);
+      if (download_bytes_sensor_) download_bytes_sensor_->publish_state(downloaded_total);
+      if (download_success_binary_) download_success_binary_->publish_state(false);
+      if (download_status_text_) download_status_text_->publish_state("chunk_failed");
+      return;
+    }
   }
   fclose(fp);
-  esp_http_client_close(client);
-  esp_http_client_cleanup(client);
-  ESP_LOGI(TAG, "DL task done: %d bytes", total);
-  if (download_bytes_sensor_) download_bytes_sensor_->publish_state(total);
-  const int expected = (SCREEN_WIDTH * SCREEN_HEIGHT) / 2; // 960000
-  if (total == expected) {
+  ESP_LOGI(TAG, "DL task done (ranged): %d bytes", downloaded_total);
+  if (download_bytes_sensor_) download_bytes_sensor_->publish_state(downloaded_total);
+  if (downloaded_total == expected) {
     if (download_success_binary_) download_success_binary_->publish_state(true);
     if (download_status_text_) download_status_text_->publish_state("ok");
   } else {
